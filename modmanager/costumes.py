@@ -135,9 +135,7 @@ def is_costume_model_target(target: str) -> bool:
 def is_model_info_target(target: str) -> bool:
     path = PurePosixPath(posix_path(target))
     parts = [part.casefold() for part in path.parts]
-    if path.suffix.casefold() != ".mi":
-        return False
-    return parts[:3] == ["asset", "common", "model_info"] or parts[:2] == ["asset", "model_info"]
+    return len(parts) >= 4 and parts[:3] == ["asset", "common", "model_info"] and path.suffix.casefold() == ".mi"
 
 
 def is_texture_target(target: str) -> bool:

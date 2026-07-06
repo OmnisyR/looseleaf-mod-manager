@@ -14,7 +14,7 @@ from .constants import (
 )
 from .i18n import DEFAULT_LANGUAGE, translate
 from .models import FileMapping
-from .pathutils import is_archive, is_table_dir_name, normalize_key, table_language
+from .pathutils import is_archive, is_table_dir_name, normalize_key, posix_path, table_language
 
 
 def _t(tr: Callable[..., str] | None, key: str, **kwargs: object) -> str:
@@ -81,13 +81,21 @@ class TableResolver:
             return (len(priority), source_table_dir)
 
 
+def normalize_asset_target(target: PurePosixPath | str) -> PurePosixPath:
+    path = PurePosixPath(posix_path(target))
+    parts = [part.casefold() for part in path.parts]
+    if path.suffix.casefold() == ".mi" and parts[:2] == ["asset", "model_info"]:
+        return MODEL_INFO_TARGET / path.name
+    return path
+
+
 def infer_target(file_path: Path, root: Path, tables: TableResolver) -> PurePosixPath | None:
     relative = file_path.resolve().relative_to(root.resolve())
     parts = relative.parts
     lowered = [part.casefold() for part in parts]
     if "asset" in lowered:
         asset_index = lowered.index("asset")
-        return PurePosixPath(*parts[asset_index:])
+        return normalize_asset_target(PurePosixPath(*parts[asset_index:]))
 
     suffix = file_path.suffix.casefold()
     if suffix == ".tbl" and file_path.name.casefold() in CUSTOM_TABLE_FILES:

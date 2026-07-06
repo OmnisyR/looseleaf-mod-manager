@@ -26,7 +26,7 @@ from .constants import (
 from .errors import ManagerError
 from .games import XINPUT_DLL, detect_profile, xinput_present
 from .i18n import Translator
-from .mapping import TableResolver, collect_mappings
+from .mapping import TableResolver, collect_mappings, normalize_asset_target
 from .migration import migrate_legacy_layout, repair_nested_game_data
 from .network import download_url_to_file
 from .pathutils import (
@@ -274,15 +274,24 @@ class ModManagerCore:
         state.setdefault("order", [])
         state.setdefault("backups", {})
         state.setdefault("last_applied_targets", [])
+        state_changed = False
         known_ids = set(state["mods"])
         state["order"] = [mod_id for mod_id in state["order"] if mod_id in known_ids]
         for mod_id in sorted(known_ids - set(state["order"])):
             state["order"].append(mod_id)
+            state_changed = True
         for mod_id, mod in state["mods"].items():
             mod.setdefault("table_sources", [])
             remaining_files = []
+            seen_files: set[str] = set()
             for target_text in mod.get("files", []):
                 target = PurePosixPath(target_text)
+                normalized_target = normalize_asset_target(target)
+                if normalized_target != target:
+                    self._relocate_mod_file(mod_id, target, normalized_target)
+                    target = normalized_target
+                    target_text = posix_path(target)
+                    state_changed = True
                 if (
                     len(target.parts) >= 2
                     and target.parts[0].casefold().startswith("table_")
@@ -296,19 +305,44 @@ class ModManagerCore:
                             "source_table_dir": target.parts[0].casefold(),
                         }
                     )
+                    state_changed = True
                 else:
+                    key = normalize_key(target_text)
+                    if key in seen_files:
+                        state_changed = True
+                        continue
+                    seen_files.add(key)
                     remaining_files.append(target_text)
+            if remaining_files != mod.get("files", []):
+                state_changed = True
             mod["files"] = remaining_files
+        if state_changed:
+            self._write_state(state)
         return state
 
     def save(self) -> None:
+        self._write_state(self.state)
+
+    def _write_state(self, state: dict) -> None:
         if not self.state_file or not self.game_data_dir:
             return
         self.game_data_dir.mkdir(parents=True, exist_ok=True)
         temp_file = self.state_file.with_suffix(".json.tmp")
         with temp_file.open("w", encoding="utf-8") as file:
-            json.dump(self.state, file, ensure_ascii=False, indent=2)
+            json.dump(state, file, ensure_ascii=False, indent=2)
         temp_file.replace(self.state_file)
+
+    def _relocate_mod_file(self, mod_id: str, old_target: PurePosixPath, new_target: PurePosixPath) -> None:
+        if old_target == new_target:
+            return
+        files_root = self.mod_files_root(mod_id)
+        old_path = files_root / Path(*old_target.parts)
+        new_path = files_root / Path(*new_target.parts)
+        if not old_path.exists() or new_path.exists():
+            return
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(old_path), str(new_path))
+        remove_empty_parents(old_path, files_root)
 
     def save_config(self) -> None:
         self.config.save()

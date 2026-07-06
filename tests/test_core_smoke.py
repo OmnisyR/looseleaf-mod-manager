@@ -39,6 +39,7 @@ class CoreSmokeTests(unittest.TestCase):
                 archive.writestr("hero.mi", b"model-info")
                 archive.writestr("body.dds", b"texture")
                 archive.writestr("asset/common/model/in_asset.mdl", b"in-asset")
+                archive.writestr("asset/model_info/wrong_dir.mi", b"normalized-model-info")
 
             outer_zip = source_dir / "outer.zip"
             with zipfile.ZipFile(outer_zip, "w") as archive:
@@ -49,6 +50,8 @@ class CoreSmokeTests(unittest.TestCase):
 
             self.assertIn("asset/common/model/hero.mdl", mod["files"])
             self.assertIn("asset/common/model_info/hero.mi", mod["files"])
+            self.assertIn("asset/common/model_info/wrong_dir.mi", mod["files"])
+            self.assertNotIn("asset/model_info/wrong_dir.mi", mod["files"])
             self.assertIn("asset/dx11/image/body.dds", mod["files"])
             self.assertIn("asset/common/model/in_asset.mdl", mod["files"])
             raw_source = core.absolute_data_path(mod["raw_source"])
@@ -60,10 +63,64 @@ class CoreSmokeTests(unittest.TestCase):
 
             self.assertEqual((core.game_root / "asset/common/model/hero.mdl").read_bytes(), b"model")
             self.assertEqual((core.game_root / "asset/common/model_info/hero.mi").read_bytes(), b"model-info")
+            self.assertEqual(
+                (core.game_root / "asset/common/model_info/wrong_dir.mi").read_bytes(),
+                b"normalized-model-info",
+            )
+            self.assertFalse((core.game_root / "asset/model_info/wrong_dir.mi").exists())
             self.assertEqual((core.game_root / "asset/dx11/image/body.dds").read_bytes(), b"texture")
             core.extra_costume_names_file.write_text('{"chr9999_c77": {"base_model": "chr9999"}}', encoding="utf-8")
             core.restore_game()
             self.assertEqual(json.loads(core.extra_costume_names_file.read_text(encoding="utf-8")), {})
+
+    def test_legacy_asset_model_info_targets_are_relocated_on_load(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            temp_root = Path(raw_temp)
+            core = self.make_core(temp_root)
+            mod_id = "bad-model-info"
+            old_target = "asset/model_info/chr5101.mi"
+            new_target = "asset/common/model_info/chr5101.mi"
+            old_source = core.mod_files_root(mod_id) / "asset" / "model_info" / "chr5101.mi"
+            old_source.parent.mkdir(parents=True)
+            old_source.write_bytes(b"legacy-model-info")
+            old_game_file = core.game_root / "asset" / "model_info" / "chr5101.mi"
+            old_game_file.parent.mkdir(parents=True)
+            old_game_file.write_bytes(b"previous-wrong-apply")
+            core.state_file.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "created_at": "test",
+                        "mods": {
+                            mod_id: {
+                                "id": mod_id,
+                                "name": "Bad Model Info",
+                                "enabled": True,
+                                "files": [old_target],
+                                "table_sources": [],
+                            }
+                        },
+                        "order": [mod_id],
+                        "backups": {},
+                        "last_applied_targets": [old_target],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            reloaded = ModManagerCore(app_dir=core.app_dir, game_root=core.game_root)
+
+            self.assertEqual(reloaded.state["mods"][mod_id]["files"], [new_target])
+            self.assertTrue((reloaded.mod_files_root(mod_id) / "asset/common/model_info/chr5101.mi").exists())
+            self.assertFalse((reloaded.mod_files_root(mod_id) / "asset/model_info/chr5101.mi").exists())
+
+            reloaded.apply_enabled()
+
+            self.assertFalse(old_game_file.exists())
+            self.assertEqual(
+                (reloaded.game_root / "asset/common/model_info/chr5101.mi").read_bytes(),
+                b"legacy-model-info",
+            )
 
     def test_conflict_winner_follows_order(self) -> None:
         with tempfile.TemporaryDirectory() as raw_temp:
