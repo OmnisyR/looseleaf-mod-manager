@@ -530,7 +530,7 @@ def parse_tbl(kurotools: Path, table_path: Path) -> dict:
     output_json = kurotools / f"{table_path.stem}.json"
     output_json.unlink(missing_ok=True)
     result = subprocess.run(
-        [sys.executable, "tbl2json.py", "-g", "Sora1", str(table_path)],
+        _python_script_command(kurotools / "tbl2json.py", "-g", "Sora1", str(table_path)),
         cwd=kurotools,
         text=True,
         capture_output=True,
@@ -556,7 +556,7 @@ def pack_tbl(kurotools: Path, table_json: dict, table_name: str, output_table: P
         with input_json.open("w", encoding="utf-8") as file:
             json.dump(table_json, file, ensure_ascii=False, indent="\t")
         result = subprocess.run(
-            [sys.executable, "json2tbl.py", str(input_json)],
+            _python_script_command(kurotools / "json2tbl.py", str(input_json)),
             cwd=kurotools,
             text=True,
             capture_output=True,
@@ -570,6 +570,12 @@ def pack_tbl(kurotools: Path, table_json: dict, table_name: str, output_table: P
     finally:
         input_json.unlink(missing_ok=True)
         packed_table.unlink(missing_ok=True)
+
+
+def _python_script_command(script: Path, *args: str) -> list[str]:
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--looseleaf-run-python", str(script), *args]
+    return [sys.executable, str(script), *args]
 
 
 def read_official_table(game_root: Path, table_dir: str, table_name: str) -> bytes | None:

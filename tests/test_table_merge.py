@@ -1,16 +1,44 @@
 from __future__ import annotations
 
+from pathlib import Path
+import sys
 import unittest
+from unittest import mock
 
+from modmanager import table_merge
 from modmanager.table_merge import (
     create_merge_state,
     extra_costume_catalog_from_json,
     merge_table_json,
     merge_table_json_changes,
+    _python_script_command,
 )
 
 
 class TableMergeTests(unittest.TestCase):
+    def test_python_script_command_uses_python_in_source_mode(self) -> None:
+        with mock.patch.object(table_merge.sys, "executable", "python.exe"):
+            self.assertEqual(
+                _python_script_command(Path("tool.py"), "arg"),
+                ["python.exe", "tool.py", "arg"],
+            )
+
+    def test_python_script_command_uses_helper_in_frozen_mode(self) -> None:
+        had_frozen = hasattr(sys, "frozen")
+        old_frozen = getattr(sys, "frozen", None)
+        try:
+            setattr(sys, "frozen", True)
+            with mock.patch.object(table_merge.sys, "executable", "manager.exe"):
+                self.assertEqual(
+                    _python_script_command(Path("tool.py"), "arg"),
+                    ["manager.exe", "--looseleaf-run-python", "tool.py", "arg"],
+                )
+        finally:
+            if had_frozen:
+                setattr(sys, "frozen", old_frozen)
+            else:
+                delattr(sys, "frozen")
+
     def test_foreign_rows_are_added_without_replacing_existing_language(self) -> None:
         base = {
             "data": [
