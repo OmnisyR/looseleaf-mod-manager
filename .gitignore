@@ -1,0 +1,10 @@
+.venv/
+manager_data/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+build/
+dist/
+*.spec
