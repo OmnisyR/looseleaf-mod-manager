@@ -9,7 +9,7 @@ from typing import Callable
 from PIL import Image, ImageDraw, ImageOps, ImageSequence, ImageTk
 from tkinterdnd2 import DND_FILES
 
-from ..costumes import modified_costumes
+from ..costumes import ModifiedAsset, modified_assets
 from ..i18n import Translator
 from ..pathutils import normalize_key
 from .tooltip import ToolTip
@@ -49,6 +49,8 @@ class PreviewPanel(ttk.Frame):
         self._costume_conflicts: dict[str, dict[str, object]] = {}
         self._costume_iid_conflicts: dict[str, dict[str, object]] = {}
         self._hover_costume_iid: str | None = None
+        self._asset_filter_key = "costumes"
+        self._asset_filter_options: list[tuple[str, str]] = []
 
         self.rowconfigure(2, weight=3)
         self.rowconfigure(3, weight=1)
@@ -92,7 +94,10 @@ class PreviewPanel(ttk.Frame):
         self.file_count_label = ttk.Label(selected_box, text="-", style="Panel.TLabel")
         self.file_count_label.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(4, 0))
         self.costume_title = ttk.Label(selected_box, style="PanelMuted.TLabel")
-        self.costume_title.grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 4))
+        self.costume_title.grid(row=2, column=0, sticky="w", pady=(10, 4))
+        self.asset_filter_combo = ttk.Combobox(selected_box, state="readonly", width=18)
+        self.asset_filter_combo.grid(row=2, column=1, sticky="e", pady=(10, 4))
+        self.asset_filter_combo.bind("<<ComboboxSelected>>", self._on_asset_filter_selected)
 
         tree_holder = ttk.Frame(selected_box, style="Panel.TFrame")
         tree_holder.grid(row=3, column=0, columnspan=2, sticky="nsew")
@@ -105,7 +110,7 @@ class PreviewPanel(ttk.Frame):
             height=7,
             selectmode="none",
         )
-        self.costume_tree.column("status", width=78, minwidth=70, anchor="center", stretch=False)
+        self.costume_tree.column("status", width=96, minwidth=82, anchor="center", stretch=False)
         self.costume_tree.column("name", width=220, minwidth=150, anchor="w", stretch=True)
         self.costume_tree.column("file", width=150, minwidth=120, anchor="w", stretch=True)
         self.costume_tree.grid(row=0, column=0, sticky="nsew")
@@ -131,15 +136,42 @@ class PreviewPanel(ttk.Frame):
         self.url_button.configure(text=self.translator.t("preview_url_button"))
         self.current_mod_label.configure(text=self.translator.t("current_mod"))
         self.file_count_title.configure(text=self.translator.t("file_count"))
-        self.costume_title.configure(text=self.translator.t("modified_costumes"))
+        self.costume_title.configure(text=self.translator.t("modified_assets"))
+        self._refresh_asset_filter_combo()
         self.costume_tree.heading("status", text=self.translator.t("costume_status"), anchor="w")
-        self.costume_tree.heading("name", text=self.translator.t("costume_name"), anchor="w")
+        self.costume_tree.heading("name", text=self.translator.t("asset_name"), anchor="w")
         self.costume_tree.heading("file", text=self.translator.t("costume_file"), anchor="w")
         self.status_label.configure(
             text=self.translator.t("preview_ready") if self._pending_mod else self.translator.t("preview_help")
         )
         self._refresh_costume_tree(self._pending_mod)
         self._render()
+
+    def _refresh_asset_filter_combo(self) -> None:
+        self._asset_filter_options = [
+            ("costumes", self.translator.t("asset_filter_costumes")),
+            ("model_info", self.translator.t("asset_filter_model_info")),
+            ("textures", self.translator.t("asset_filter_textures")),
+            ("all", self.translator.t("asset_filter_all")),
+        ]
+        labels = [label for _key, label in self._asset_filter_options]
+        self.asset_filter_combo.configure(values=labels)
+        selected_index = next(
+            (
+                index
+                for index, (key, _label) in enumerate(self._asset_filter_options)
+                if key == self._asset_filter_key
+            ),
+            0,
+        )
+        self.asset_filter_combo.set(labels[selected_index])
+
+    def _on_asset_filter_selected(self, _event: object) -> None:
+        index = self.asset_filter_combo.current()
+        if index < 0 or index >= len(self._asset_filter_options):
+            return
+        self._asset_filter_key = self._asset_filter_options[index][0]
+        self._refresh_costume_tree(self._pending_mod)
 
     def show(
         self,
@@ -171,19 +203,19 @@ class PreviewPanel(ttk.Frame):
             self.costume_tree.insert("", tk.END, values=("-", "-", "-"), tags=("empty",))
             return
 
-        changes = modified_costumes(list(mod.get("files") or []), self.translator.language)
+        changes = modified_assets(list(mod.get("files") or []), self._asset_filter_key, self.translator.language)
         if not changes:
             self.costume_tree.insert(
                 "",
                 tk.END,
-                values=("", self.translator.t("no_costumes"), ""),
+                values=("", self.translator.t("no_modified_assets"), ""),
                 tags=("empty",),
             )
             return
 
         for index, change in enumerate(changes):
             tags = []
-            status = self.translator.t("recognized" if change.recognized else "unrecognized")
+            status = self._asset_status_text(change)
             conflict = self._costume_conflicts.get(normalize_key(change.target))
             if conflict:
                 role = str(conflict.get("role") or "")
@@ -209,6 +241,11 @@ class PreviewPanel(ttk.Frame):
             if conflict:
                 self._costume_iid_conflicts[iid] = conflict
 
+    def _asset_status_text(self, change: ModifiedAsset) -> str:
+        if self._asset_filter_key == "all":
+            return self.translator.t(f"asset_kind_{change.kind}")
+        return self.translator.t("recognized" if change.recognized else "unrecognized")
+
     def _on_costume_motion(self, event: object) -> None:
         iid = self.costume_tree.identify_row(event.y)
         if not iid:
@@ -232,9 +269,9 @@ class PreviewPanel(ttk.Frame):
         role = str(conflict.get("role") or "")
         if role == "winner":
             mods = ", ".join(str(name) for name in conflict.get("others", []) if name)
-            return self.translator.t("costume_conflict_winner_tip", mods=mods or "-")
+            return self.translator.t("asset_conflict_winner_tip", mods=mods or "-")
         if role == "loser":
-            return self.translator.t("costume_conflict_loser_tip", winner=conflict.get("winner", "-"))
+            return self.translator.t("asset_conflict_loser_tip", winner=conflict.get("winner", "-"))
         return ""
 
     def _on_configure(self, _event: object) -> None:

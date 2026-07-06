@@ -50,6 +50,18 @@ class CostumeChange:
     recognized: bool
 
 
+@dataclass(frozen=True)
+class ModifiedAsset:
+    target: str
+    file_name: str
+    stem: str
+    display_name: str
+    kind: str
+    character_id: str
+    character_name: str
+    recognized: bool
+
+
 @lru_cache(maxsize=1)
 def _catalog() -> dict[str, CostumeInfo]:
     catalog: dict[str, CostumeInfo] = {}
@@ -118,6 +130,71 @@ def is_costume_model_target(target: str) -> bool:
     if "_m_" in stem:
         return False
     return re.fullmatch(r"chr\d+(?:_c[0-9a-z]+)?", stem) is not None
+
+
+def is_model_info_target(target: str) -> bool:
+    path = PurePosixPath(posix_path(target))
+    parts = [part.casefold() for part in path.parts]
+    if path.suffix.casefold() != ".mi":
+        return False
+    return parts[:3] == ["asset", "common", "model_info"] or parts[:2] == ["asset", "model_info"]
+
+
+def is_texture_target(target: str) -> bool:
+    path = PurePosixPath(posix_path(target))
+    parts = [part.casefold() for part in path.parts]
+    return len(parts) >= 4 and parts[:3] == ["asset", "dx11", "image"] and path.suffix.casefold() == ".dds"
+
+
+def _modified_asset(target: str, kind: str, language: str) -> ModifiedAsset:
+    path = PurePosixPath(posix_path(target))
+    stem = path.stem
+    info = lookup(stem)
+    character_id = info.base_model if info else character_id_from_stem(stem)
+    display_character = character_name(character_id, language)
+    return ModifiedAsset(
+        target=posix_path(target),
+        file_name=path.name,
+        stem=stem,
+        display_name=info.display(language) if info else path.name,
+        kind=kind,
+        character_id=character_id or stem,
+        character_name=display_character,
+        recognized=info is not None,
+    )
+
+
+def modified_assets(files: list[str], category: str = "costumes", language: str = "zh_CN") -> list[ModifiedAsset]:
+    assets: list[ModifiedAsset] = []
+    seen: set[tuple[str, str]] = set()
+    include_costumes = category in {"costumes", "all"}
+    include_model_info = category in {"model_info", "all"}
+    include_textures = category in {"textures", "all"}
+
+    for target in files:
+        kind = ""
+        if include_costumes and is_costume_model_target(target):
+            kind = "costume"
+        elif include_model_info and is_model_info_target(target):
+            kind = "model_info"
+        elif include_textures and is_texture_target(target):
+            kind = "texture"
+        if not kind:
+            continue
+
+        key = (kind, posix_path(target).casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        assets.append(_modified_asset(target, kind, language))
+
+    if category == "all":
+        assets.sort(key=lambda item: (item.file_name.casefold(), item.target.casefold()))
+        return assets
+
+    known = sorted((item for item in assets if item.recognized), key=lambda item: item.display_name.casefold())
+    raw = sorted((item for item in assets if not item.recognized), key=lambda item: item.file_name.casefold())
+    return known + raw
 
 
 def modified_costumes(files: list[str], language: str = "zh_CN") -> list[CostumeChange]:

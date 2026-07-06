@@ -47,6 +47,8 @@ def apply_theme(root: tk.Misc) -> dict[str, str]:
     root.option_add("*TCombobox*Listbox.selectForeground", colors["selected_fg"])
     root.option_add("*TCombobox*Listbox.activeBackground", colors["heading_hover"])
     root.option_add("*TCombobox*Listbox.activeForeground", colors["text"])
+    root.option_add("*TCombobox*Listbox.highlightThickness", 0)
+    root.option_add("*TCombobox*Listbox.relief", "flat")
     style = ttk.Style()
     style.theme_use("clam")
     style.configure(".", font=("Microsoft YaHei UI", 10), background=colors["bg"], foreground=colors["text"])
@@ -62,29 +64,53 @@ def apply_theme(root: tk.Misc) -> dict[str, str]:
         background=colors["panel2"],
         foreground=colors["text"],
         bordercolor=colors["line"],
-        focusthickness=2,
-        focuscolor=colors["accent"],
+        focusthickness=0,
+        focuscolor=colors["panel2"],
         padding=(10, 6),
+        relief="flat",
     )
     style.map(
         "TButton",
         background=[
-            ("pressed", colors["panel3"]),
-            ("active", colors["heading_hover"]),
             ("disabled", colors["panel"]),
+            ("focus", colors["panel2"]),
+            ("pressed", colors["panel2"]),
+            ("active", colors["panel2"]),
+        ],
+        bordercolor=[
+            ("disabled", colors["line"]),
+            ("focus", colors["line"]),
+            ("pressed", colors["line"]),
+            ("active", colors["line"]),
         ],
         foreground=[("disabled", colors["disabled"])],
+        relief=[("focus", "flat"), ("pressed", "flat"), ("active", "flat")],
     )
     style.configure(
         "Accent.TButton",
         background=colors["accent"],
         foreground="#191510",
         bordercolor=colors["accent"],
+        focuscolor=colors["accent"],
+        focusthickness=0,
+        relief="flat",
     )
     style.map(
         "Accent.TButton",
-        background=[("pressed", colors["accent_pressed"]), ("active", colors["accent_hover"])],
+        background=[
+            ("disabled", colors["panel"]),
+            ("focus", colors["accent"]),
+            ("pressed", colors["accent"]),
+            ("active", colors["accent"]),
+        ],
+        bordercolor=[
+            ("disabled", colors["line"]),
+            ("focus", colors["accent"]),
+            ("pressed", colors["accent"]),
+            ("active", colors["accent"]),
+        ],
         foreground=[("disabled", colors["disabled"])],
+        relief=[("focus", "flat"), ("pressed", "flat"), ("active", "flat")],
     )
     style.configure(
         "Treeview",
@@ -109,16 +135,18 @@ def apply_theme(root: tk.Misc) -> dict[str, str]:
     style.map(
         "Treeview.Heading",
         background=[
-            ("pressed", colors["heading_pressed"]),
-            ("active", colors["heading_hover"]),
             ("disabled", colors["panel2"]),
+            ("focus", colors["heading_bg"]),
+            ("pressed", colors["heading_bg"]),
+            ("active", colors["heading_bg"]),
         ],
         foreground=[
-            ("pressed", colors["text"]),
-            ("active", colors["text"]),
             ("disabled", colors["disabled"]),
+            ("focus", colors["muted"]),
+            ("pressed", colors["muted"]),
+            ("active", colors["muted"]),
         ],
-        relief=[("pressed", "flat"), ("active", "flat")],
+        relief=[("focus", "flat"), ("pressed", "flat"), ("active", "flat")],
     )
     style.map(
         "Treeview",
@@ -138,21 +166,46 @@ def apply_theme(root: tk.Misc) -> dict[str, str]:
         foreground=colors["text"],
         bordercolor=colors["line"],
         arrowcolor=colors["text"],
-        selectbackground=colors["panel2"],
+        selectbackground=colors["input_bg"],
         selectforeground=colors["text"],
         insertcolor=colors["text"],
+        focuscolor=colors["input_bg"],
+        focusthickness=0,
+        relief="flat",
     )
     style.map(
         "TCombobox",
-        fieldbackground=[("readonly", colors["input_bg"]), ("disabled", colors["panel"])],
-        background=[
-            ("active", colors["heading_hover"]),
-            ("readonly", colors["panel2"]),
+        fieldbackground=[
             ("disabled", colors["panel"]),
+            ("focus", colors["input_bg"]),
+            ("readonly", colors["input_bg"]),
         ],
-        foreground=[("readonly", colors["text"]), ("disabled", colors["disabled"])],
-        selectbackground=[("readonly", colors["selected_bg"])],
-        selectforeground=[("readonly", colors["text"])],
+        background=[
+            ("disabled", colors["panel"]),
+            ("focus", colors["panel2"]),
+            ("pressed", colors["panel2"]),
+            ("active", colors["panel2"]),
+            ("readonly", colors["panel2"]),
+        ],
+        foreground=[("disabled", colors["disabled"]), ("focus", colors["text"]), ("readonly", colors["text"])],
+        selectbackground=[
+            ("disabled", colors["panel"]),
+            ("focus", colors["input_bg"]),
+            ("readonly", colors["input_bg"]),
+        ],
+        selectforeground=[("disabled", colors["disabled"]), ("focus", colors["text"]), ("readonly", colors["text"])],
+        bordercolor=[
+            ("disabled", colors["line"]),
+            ("focus", colors["line"]),
+            ("pressed", colors["line"]),
+            ("active", colors["line"]),
+        ],
+        arrowcolor=[
+            ("disabled", colors["disabled"]),
+            ("focus", colors["text"]),
+            ("pressed", colors["text"]),
+            ("active", colors["text"]),
+        ],
     )
     for scrollbar_style in ("Vertical.TScrollbar", "Horizontal.TScrollbar"):
         style.configure(
@@ -168,26 +221,30 @@ def apply_theme(root: tk.Misc) -> dict[str, str]:
         style.map(
             scrollbar_style,
             background=[
-                ("pressed", colors["heading_pressed"]),
-                ("active", colors["heading_hover"]),
                 ("disabled", colors["panel"]),
+                ("focus", colors["panel2"]),
+                ("pressed", colors["panel2"]),
+                ("active", colors["panel2"]),
             ],
             troughcolor=[("disabled", colors["panel"])],
             arrowcolor=[
-                ("pressed", colors["text"]),
-                ("active", colors["text"]),
                 ("disabled", colors["disabled"]),
+                ("focus", colors["muted"]),
+                ("pressed", colors["muted"]),
+                ("active", colors["muted"]),
             ],
             bordercolor=[("disabled", colors["line"])],
             lightcolor=[
-                ("pressed", colors["heading_pressed"]),
-                ("active", colors["heading_hover"]),
                 ("disabled", colors["panel"]),
+                ("focus", colors["panel2"]),
+                ("pressed", colors["panel2"]),
+                ("active", colors["panel2"]),
             ],
             darkcolor=[
-                ("pressed", colors["heading_pressed"]),
-                ("active", colors["heading_hover"]),
                 ("disabled", colors["panel"]),
+                ("focus", colors["panel2"]),
+                ("pressed", colors["panel2"]),
+                ("active", colors["panel2"]),
             ],
         )
     style.configure(

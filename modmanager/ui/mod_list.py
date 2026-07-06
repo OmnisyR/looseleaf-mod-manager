@@ -36,6 +36,7 @@ class ModListPanel(ttk.Frame):
         self.on_toggle = on_toggle
         self.on_move = on_move
         self.on_delete = on_delete
+        self.on_open_data_dir = on_open_data_dir
         self.on_reorder = on_reorder
         self.selected_mod_id: str | None = None
         self.dragging_iid: str | None = None
@@ -94,7 +95,8 @@ class ModListPanel(ttk.Frame):
         tree_scroll.grid(row=0, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=tree_scroll.set)
         self.tree.tag_configure("dragging", background=colors["drag_bg"], foreground=colors["drag_fg"])
-        self.tree.tag_configure("drag-placeholder", background=colors["panel2"], foreground=colors["panel2"])
+        self.tree.tag_configure("drag-placeholder-even", background=colors["panel"], foreground=colors["panel"])
+        self.tree.tag_configure("drag-placeholder-odd", background=colors["stripe"], foreground=colors["stripe"])
         self.tree.tag_configure("partner", background=colors["partner_bg"], foreground=colors["partner_fg"])
         self.tree.tag_configure("conflict-winner", background=colors["winner_bg"], foreground=colors["winner_fg"])
         self.tree.tag_configure("conflict-loser", background=colors["loser_bg"], foreground=colors["loser_fg"])
@@ -106,6 +108,17 @@ class ModListPanel(ttk.Frame):
         self._tooltip = ToolTip(self.tree, colors)
 
         self.empty_hint = ttk.Label(tree_holder, style="PanelMuted.TLabel", justify=tk.CENTER)
+        self.context_menu = tk.Menu(
+            self,
+            tearoff=False,
+            bg=colors["panel2"],
+            fg=colors["text"],
+            activebackground=colors["heading_hover"],
+            activeforeground=colors["text"],
+            disabledforeground=colors["disabled"],
+            borderwidth=1,
+            relief=tk.FLAT,
+        )
 
         self.tree.drop_target_register(DND_FILES)
         self.tree.dnd_bind("<<Drop>>", on_drop)
@@ -113,7 +126,6 @@ class ModListPanel(ttk.Frame):
         self.dnd_bind("<<Drop>>", on_drop)
 
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
-        self.tree.bind("<Double-1>", self._on_double_click)
         self.tree.bind("<ButtonPress-1>", self._on_press)
         self.tree.bind("<B1-Motion>", self._on_drag)
         self.tree.bind("<ButtonRelease-1>", self._on_release)
@@ -122,6 +134,7 @@ class ModListPanel(ttk.Frame):
         self.tree.bind("<space>", lambda _event: self._request_toggle())
         self.tree.bind("<Motion>", self._on_motion)
         self.tree.bind("<Leave>", self._on_leave)
+        self.tree.bind("<Button-3>", self._show_context_menu)
 
         buttons = ttk.Frame(self, style="Panel.TFrame")
         buttons.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
@@ -152,6 +165,7 @@ class ModListPanel(ttk.Frame):
         self.down_button.configure(text=self.translator.t("move_down"))
         self.delete_button.configure(text=self.translator.t("delete"))
         self.open_data_button.configure(text=self.translator.t("open_data_dir"))
+        self._rebuild_context_menu()
         if self._last_mods:
             self.refresh(
                 self._last_mods,
@@ -182,15 +196,37 @@ class ModListPanel(ttk.Frame):
         if mod_id:
             self.on_delete(mod_id)
 
+    def _request_open_data_dir(self) -> None:
+        self.on_open_data_dir()
+
+    def _rebuild_context_menu(self) -> None:
+        self.context_menu.delete(0, tk.END)
+        self.context_menu.add_command(label=self.translator.t("toggle"), command=self._request_toggle)
+        self.context_menu.add_separator()
+        self.context_menu.add_command(label=self.translator.t("delete"), command=self._request_delete)
+        self.context_menu.add_command(label=self.translator.t("open_data_dir"), command=self._request_open_data_dir)
+
     def _on_tree_select(self, _event: object) -> None:
         self.selected_mod_id = self.get_selected_mod_id()
         self.on_select(self.selected_mod_id)
 
-    def _on_double_click(self, event: object) -> None:
-        row_id = self.tree.identify_row(event.y)
-        column = self.tree.identify_column(event.x)
-        if row_id and column in ("#1", "#2"):
-            self.on_toggle(row_id)
+    def _show_context_menu(self, event: object) -> str:
+        self._tooltip.hide()
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return "break"
+        self.dragging_iid = None
+        self.dragging_started = False
+        self.dragging_last_target = None
+        self.tree.selection_set(iid)
+        self.tree.focus(iid)
+        self.selected_mod_id = iid
+        self.on_select(iid)
+        try:
+            self.context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.context_menu.grab_release()
+        return "break"
 
     def _on_press(self, event: object) -> None:
         self._tooltip.hide()
@@ -218,7 +254,7 @@ class ModListPanel(ttk.Frame):
         children = list(self.tree.get_children())
         target_index = children.index(target_iid)
         self.tree.move(self.dragging_iid, "", target_index)
-        self.tree.selection_set(self.dragging_iid)
+        self.tree.selection_remove(self.dragging_iid)
 
     def _on_release(self, _event: object) -> None:
         if self.dragging_started and self.dragging_iid:
@@ -239,9 +275,16 @@ class ModListPanel(ttk.Frame):
         self.tree.item(
             self.dragging_iid,
             values=("", "", "", ""),
-            tags=("drag-placeholder",),
+            tags=(self._drag_placeholder_tag(),),
         )
         self._create_drag_ghost(event)
+        self.tree.selection_remove(self.dragging_iid)
+
+    def _drag_placeholder_tag(self) -> str:
+        if not self.dragging_iid:
+            return "drag-placeholder-even"
+        base_tags = self._base_tags.get(self.dragging_iid, [])
+        return "drag-placeholder-odd" if "odd" in base_tags else "drag-placeholder-even"
 
     def _restore_dragged_row(self) -> None:
         if not self.dragging_iid:

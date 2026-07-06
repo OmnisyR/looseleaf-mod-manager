@@ -63,6 +63,35 @@ class CostumeLookupTests(unittest.TestCase):
         self.assertEqual(changes[1].character_id, "chr9999")
         self.assertEqual(changes[1].character_name, "chr9999")
 
+    def test_modified_assets_filter_by_kind_and_sort_all_by_filename(self) -> None:
+        files = [
+            "asset/dx11/image/z_texture.dds",
+            "asset/common/model_info/b_model.mi",
+            "asset/model_info/c_model.mi",
+            "asset/common/model/chr5000_c01.mdl",
+            "asset/common/model/equ0310.mdl",
+            "asset/dx11/image/chr5000_c01.dds",
+            "asset/common/model_info/a_model.mi",
+        ]
+
+        costumes_only = costumes.modified_assets(files, "costumes", "en")
+        self.assertEqual([asset.file_name for asset in costumes_only], ["chr5000_c01.mdl"])
+        self.assertEqual(costumes_only[0].kind, "costume")
+
+        model_info = costumes.modified_assets(files, "model_info", "en")
+        self.assertEqual([asset.file_name for asset in model_info], ["a_model.mi", "b_model.mi", "c_model.mi"])
+        self.assertTrue(all(asset.kind == "model_info" for asset in model_info))
+
+        textures = costumes.modified_assets(files, "textures", "en")
+        self.assertEqual([asset.file_name for asset in textures], ["chr5000_c01.dds", "z_texture.dds"])
+        self.assertTrue(all(asset.kind == "texture" for asset in textures))
+
+        all_assets = costumes.modified_assets(files, "all", "en")
+        self.assertEqual(
+            [asset.file_name for asset in all_assets],
+            ["a_model.mi", "b_model.mi", "c_model.mi", "chr5000_c01.dds", "chr5000_c01.mdl", "z_texture.dds"],
+        )
+
     def test_costume_characters_groups_known_and_unknown_models(self) -> None:
         characters = costumes.costume_characters(
             [
