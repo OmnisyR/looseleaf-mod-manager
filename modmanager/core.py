@@ -20,6 +20,7 @@ from .constants import (
     IMAGE_EXTENSIONS,
     MAX_PREVIEW_DOWNLOAD_BYTES,
     MAX_XINPUT_DOWNLOAD_BYTES,
+    MODEL_INFO_PAC_NAME,
     PREVIEW_FORMAT_EXTENSIONS,
     XINPUT_DOWNLOAD_URL,
 )
@@ -28,7 +29,9 @@ from .games import XINPUT_DLL, detect_profile, xinput_present
 from .i18n import Translator
 from .mapping import TableResolver, collect_mappings, normalize_asset_target
 from .migration import migrate_legacy_layout, repair_nested_game_data
+from .model_info import compare_model_info
 from .network import download_url_to_file
+from .pac import PacEntry, find_pac_entry, read_pac_member
 from .pathutils import (
     clean_mod_name,
     copy_file,
@@ -93,6 +96,7 @@ class ModManagerCore:
         self.game_data_dir: Path | None = None
         self.mods_dir: Path | None = None
         self.backups_dir: Path | None = None
+        self.model_info_cache_dir: Path | None = None
         self.table_cache_dir: Path | None = None
         self.generated_dir: Path | None = None
         self.staging_dir: Path | None = None
@@ -106,6 +110,7 @@ class ModManagerCore:
         self.game_data_dir = game_data
         self.mods_dir = game_data / "mods"
         self.backups_dir = game_data / "backups"
+        self.model_info_cache_dir = game_data / "model_info_cache"
         self.table_cache_dir = game_data / "table_cache"
         self.generated_dir = game_data / "_generated"
         self.staging_dir = game_data / "_staging"
@@ -115,6 +120,7 @@ class ModManagerCore:
             game_data,
             self.mods_dir,
             self.backups_dir,
+            self.model_info_cache_dir,
             self.table_cache_dir,
             self.generated_dir,
             self.staging_dir,
@@ -352,6 +358,10 @@ class ModManagerCore:
         self.translator.set_language(language)
         self.save_config()
 
+    def set_model_info_diff_enabled(self, enabled: bool) -> None:
+        self.config.model_info_diff_enabled = enabled
+        self.save_config()
+
     def mod_files_root(self, mod_id: str) -> Path:
         return self.mods_dir / mod_id / "files"
 
@@ -367,6 +377,88 @@ class ModManagerCore:
 
     def active_table_dir(self) -> str:
         return self.tables.active_table_dir()
+
+    # -- model info diff ------------------------------------------------------
+
+    def model_info_diffs_for_mod(self, mod_id: str) -> dict[str, dict[str, object]]:
+        mod = self.state["mods"].get(mod_id)
+        if not mod:
+            return {}
+        result: dict[str, dict[str, object]] = {}
+        for target_text in mod.get("files", []):
+            key = normalize_key(target_text)
+            diff = self.model_info_diff_for_target(mod_id, target_text)
+            if diff is not None:
+                result[key] = diff
+        return result
+
+    def model_info_diff_for_target(self, mod_id: str, target_text: str) -> dict[str, object] | None:
+        mod = self.state["mods"].get(mod_id)
+        if not mod or target_text not in mod.get("files", []):
+            return None
+        if not costumes.is_model_info_target(target_text):
+            return None
+        target = PurePosixPath(target_text)
+        source = self.mod_files_root(mod_id) / Path(*target.parts)
+        if not source.exists():
+            return {"status": "error", "error": self.t("model_info_diff_source_missing")}
+        try:
+            original = self.read_original_model_info_bytes(target_text)
+            return compare_model_info(original, source.read_bytes()).to_dict()
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+
+    def read_original_model_info_bytes(self, target_text: str) -> bytes | None:
+        cached = self.cache_original_model_info(target_text)
+        if cached and cached.exists():
+            return cached.read_bytes()
+        return None
+
+    def cache_original_model_info(self, target_text: str) -> Path | None:
+        if not self.game_root or not self.model_info_cache_dir:
+            return None
+        if not costumes.is_model_info_target(target_text):
+            return None
+        target = PurePosixPath(posix_path(target_text))
+        pac_source = self._find_model_info_pac_entry(target)
+        if pac_source is None:
+            return None
+        cache_path = self.model_info_cache_dir / Path(*target.parts)
+        if cache_path.exists():
+            return cache_path
+
+        try:
+            data = read_pac_member(*pac_source)
+        except Exception:
+            data = None
+        if data is None:
+            return None
+
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_bytes(data)
+        return cache_path
+
+    def _find_model_info_pac_entry(self, target: PurePosixPath) -> tuple[Path, PacEntry] | None:
+        if not self.game_root:
+            return None
+        pac_path = self.game_root / "pac" / "steam" / MODEL_INFO_PAC_NAME
+        if not pac_path.exists():
+            return None
+        candidates = [
+            posix_path(target),
+            f"model_info/{target.name}",
+            target.name,
+        ]
+        entry = find_pac_entry(pac_path, candidates)
+        if entry is None:
+            return None
+        return pac_path, entry
+
+    def _read_model_info_from_pac(self, target: PurePosixPath) -> bytes | None:
+        pac_source = self._find_model_info_pac_entry(target)
+        if pac_source is None:
+            return None
+        return read_pac_member(*pac_source)
 
     # -- import -----------------------------------------------------------
 

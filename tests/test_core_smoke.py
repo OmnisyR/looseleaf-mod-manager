@@ -5,6 +5,7 @@ import threading
 import unittest
 import zipfile
 import json
+import struct
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -17,6 +18,32 @@ from mod_manager import ModManagerCore
 class QuietSimpleHTTPRequestHandler(SimpleHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         pass
+
+
+def write_fake_fpac(path: Path, entries: list[tuple[str, bytes]]) -> None:
+    index_size = 16 + len(entries) * 32
+    name_blob = bytearray()
+    name_offsets: list[int] = []
+    for name, _data in entries:
+        name_offsets.append(index_size + len(name_blob))
+        name_blob.extend(name.encode("utf-8") + b"\0")
+
+    data_start = index_size + len(name_blob)
+    data_blob = bytearray()
+    raw_entries = []
+    for index, (_name, data) in enumerate(entries):
+        data_offset = data_start + len(data_blob)
+        raw_entries.append((0, name_offsets[index], len(data), data_offset))
+        data_blob.extend(data)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as file:
+        file.write(b"FPAC")
+        file.write(struct.pack("<3I", len(entries), data_start, 0))
+        for raw_entry in raw_entries:
+            file.write(struct.pack("<4Q", *raw_entry))
+        file.write(name_blob)
+        file.write(data_blob)
 
 
 class CoreSmokeTests(unittest.TestCase):
@@ -274,11 +301,60 @@ class CoreSmokeTests(unittest.TestCase):
             self.assertEqual(destination.read_bytes(), dll_bytes)
             self.assertEqual(core.config.xinput_download_url, url)
 
+    def test_model_info_diff_uses_original_from_pac_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            temp_root = Path(raw_temp)
+            core = self.make_core(temp_root)
+            original = b"JSON\0\0\0\0\0\0\0\0\0\0\0\0Root\0"
+            modified = b"JSON\0\0\0\0\0\0\0\0\0\0\0\0Root\0LeftBreast\0"
+            write_fake_fpac(
+                core.game_root / "pac" / "steam" / "asset_common_model_info.pac",
+                [("model_info/hero.mi", original)],
+            )
+
+            mod_source = temp_root / "model_info_mod"
+            mod_source.mkdir()
+            (mod_source / "hero.mi").write_bytes(modified)
+            mod_id = core.import_path(mod_source)
+
+            diffs = core.model_info_diffs_for_mod(mod_id)
+            diff = diffs["asset/common/model_info/hero.mi"]
+            self.assertEqual(diff["status"], "changed")
+            self.assertEqual(diff["original_size"], len(original))
+            self.assertEqual(diff["modified_size"], len(modified))
+            cache_path = core.model_info_cache_dir / "asset" / "common" / "model_info" / "hero.mi"
+            self.assertEqual(cache_path.read_bytes(), original)
+
+    def test_model_info_diff_requires_original_from_pac(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            temp_root = Path(raw_temp)
+            core = self.make_core(temp_root)
+            target = "asset/common/model_info/new_costume.mi"
+            modified = b"JSON\0\0\0\0\0\0\0\0\0\0\0\0Root\0AddedModelInfo\0"
+
+            game_file = core.game_root / "asset" / "common" / "model_info" / "new_costume.mi"
+            game_file.parent.mkdir(parents=True)
+            game_file.write_bytes(modified)
+            cache_path = core.model_info_cache_dir / "asset" / "common" / "model_info" / "new_costume.mi"
+            cache_path.parent.mkdir(parents=True)
+            cache_path.write_bytes(modified)
+
+            mod_source = temp_root / "added_model_info_mod"
+            mod_source.mkdir()
+            (mod_source / "new_costume.mi").write_bytes(modified)
+            mod_id = core.import_path(mod_source)
+
+            diff = core.model_info_diff_for_target(mod_id, target)
+            self.assertIsNotNone(diff)
+            self.assertEqual(diff["status"], "missing_original")
+            self.assertTrue(cache_path.exists())
+
     def test_config_persists_language_and_window_layout(self) -> None:
         with tempfile.TemporaryDirectory() as raw_temp:
             temp_root = Path(raw_temp)
             core = self.make_core(temp_root)
             core.set_language("en")
+            core.set_model_info_diff_enabled(True)
             core.config.set_window_value("geometry", "1024x700+20+30")
             core.config.set_window_value("state", "zoomed")
             core.config.set_window_value("main_sash", 640)
@@ -286,12 +362,14 @@ class CoreSmokeTests(unittest.TestCase):
 
             stored = json.loads(core.config_file.read_text(encoding="utf-8"))
             self.assertEqual(stored["language"], "en")
+            self.assertTrue(stored["advanced"]["model_info_diff"])
             self.assertEqual(stored["window"]["geometry"], "1024x700+20+30")
             self.assertEqual(stored["window"]["state"], "zoomed")
             self.assertEqual(stored["window"]["main_sash"], 640)
 
             reloaded = ModManagerCore(app_dir=core.app_dir, game_root=core.game_root)
             self.assertEqual(reloaded.config.language, "en")
+            self.assertTrue(reloaded.config.model_info_diff_enabled)
             self.assertEqual(reloaded.config.get_window_value("main_sash"), 640)
 
 

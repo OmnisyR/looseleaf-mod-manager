@@ -14,6 +14,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "active_game_id": None,
     "games": {},  # game_id -> {"name": str, "path": str, "exe": str | None}
     "xinput_download_url": "",
+    "advanced": {
+        "model_info_diff": False,
+    },
     "window": {
         "geometry": "1180x800",
         "state": "normal",
@@ -168,6 +171,21 @@ class ManagerConfig:
     @xinput_download_url.setter
     def xinput_download_url(self, value: str) -> None:
         self.data["xinput_download_url"] = value
+
+    @property
+    def advanced(self) -> dict[str, Any]:
+        advanced = self.data.setdefault("advanced", {})
+        if not isinstance(advanced, dict):
+            self.data["advanced"] = copy.deepcopy(DEFAULT_CONFIG["advanced"])
+        return self.data["advanced"]
+
+    @property
+    def model_info_diff_enabled(self) -> bool:
+        return bool(self.advanced.get("model_info_diff", False))
+
+    @model_info_diff_enabled.setter
+    def model_info_diff_enabled(self, value: bool) -> None:
+        self.advanced["model_info_diff"] = bool(value)
 
     @property
     def window(self) -> dict[str, Any]:

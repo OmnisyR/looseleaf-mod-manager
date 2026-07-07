@@ -15,6 +15,7 @@ GAME_ROOT = APP_DIR.parent
 DATA_DIR_NAME = "manager_data"
 MODEL_TARGET = PurePosixPath("asset/common/model")
 MODEL_INFO_TARGET = PurePosixPath("asset/common/model_info")
+MODEL_INFO_PAC_NAME = "asset_common_model_info.pac"
 IMAGE_TARGET = PurePosixPath("asset/dx11/image")
 DEFAULT_TABLE_TARGET = "table_sc"
 

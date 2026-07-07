@@ -31,6 +31,14 @@ PALETTE = {
     "mixed_fg": "#dcc7ff",
     "partner_bg": "#22394d",
     "partner_fg": "#b8ddff",
+    "selection_rail": "#9fb7aa",
+    "selection_line": "#657d73",
+    "diff_changed_bg": "#3b3422",
+    "diff_changed_fg": "#efd487",
+    "diff_same_bg": "#20342d",
+    "diff_same_fg": "#a8e0ba",
+    "diff_missing_fg": "#7f8a82",
+    "diff_error_fg": "#e07968",
     "drag_bg": "#d2b45f",
     "drag_fg": "#16130a",
     "input_bg": "#161c1a",
@@ -205,6 +213,39 @@ def apply_theme(root: tk.Misc) -> dict[str, str]:
             ("focus", colors["text"]),
             ("pressed", colors["text"]),
             ("active", colors["text"]),
+        ],
+    )
+    style.configure(
+        "TCheckbutton",
+        background=colors["panel"],
+        foreground=colors["text"],
+        focuscolor=colors["panel"],
+        focusthickness=0,
+        indicatorcolor=colors["input_bg"],
+        bordercolor=colors["line"],
+        lightcolor=colors["line"],
+        darkcolor=colors["line"],
+        padding=(4, 2),
+    )
+    style.map(
+        "TCheckbutton",
+        background=[
+            ("disabled", colors["panel"]),
+            ("focus", colors["panel"]),
+            ("pressed", colors["panel"]),
+            ("active", colors["panel"]),
+        ],
+        foreground=[
+            ("disabled", colors["disabled"]),
+            ("focus", colors["text"]),
+            ("pressed", colors["text"]),
+            ("active", colors["text"]),
+        ],
+        indicatorcolor=[
+            ("disabled", colors["panel2"]),
+            ("selected", colors["accent"]),
+            ("pressed", colors["input_bg"]),
+            ("active", colors["input_bg"]),
         ],
     )
     for scrollbar_style in ("Vertical.TScrollbar", "Horizontal.TScrollbar"):

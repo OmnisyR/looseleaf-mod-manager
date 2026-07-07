@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import os
 import queue
 import threading
@@ -11,6 +12,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
+from .. import costumes
 from ..core import ModManagerCore
 from ..games import default_game_picker_dir, looks_like_game_dir
 from ..i18n import LANGUAGES, Translator
@@ -22,6 +24,10 @@ from .mod_list import ModListPanel
 from .preview_panel import PreviewPanel
 from .status_bar import StatusBar
 from .theme import apply_theme
+
+MODEL_INFO_DIFF_PRIORITY_HOVER = 0
+MODEL_INFO_DIFF_PRIORITY_SELECTED = 20
+QUEUE_POLL_ITEM_LIMIT = 120
 
 
 class ModManagerApp:
@@ -38,6 +44,14 @@ class ModManagerApp:
         self._layout_wait_size: tuple[int, int, int] | None = None
 
         self._game_ids: list[str] = []
+        self._model_info_diff_cache: dict[tuple[str, str, str], dict[str, object]] = {}
+        self._model_info_diff_pending: set[tuple[str, str, str]] = set()
+        self._model_info_diff_queue: queue.PriorityQueue[tuple[int, int, str, str, str]] = queue.PriorityQueue()
+        self._model_info_diff_counter = itertools.count()
+        self._model_info_diff_lock = threading.Lock()
+        self._model_info_diff_shutdown = False
+        self._model_info_diff_worker_count = 1
+        self._start_model_info_diff_workers()
 
         self.root.geometry(self._last_normal_geometry)
         self.root.minsize(980, 660)
@@ -179,6 +193,10 @@ class ModManagerApp:
             on_choose_file=self.choose_preview,
             on_choose_url=self.choose_preview_url,
             on_drop=self.on_preview_drop,
+            model_info_diff_enabled=self.core.config.model_info_diff_enabled,
+            on_model_info_diff_toggle=self.set_model_info_diff_enabled,
+            on_model_info_hover=self.prioritize_model_info_diff,
+            get_model_info_diff=self.model_info_diff_for_tooltip,
         )
         self.preview_panel.grid(row=0, column=0, sticky="nsew")
 
@@ -217,6 +235,7 @@ class ModManagerApp:
         self.xinput_open_button.configure(text=t("open_game_dir"))
         self.log_title_label.configure(text=t("log"))
         self.mod_list.set_language()
+        self.preview_panel.set_model_info_diff_enabled(self.core.config.model_info_diff_enabled)
         self.preview_panel.set_language()
         self.conflict_panel.set_language()
         self.status_bar.set_language()
@@ -248,6 +267,7 @@ class ModManagerApp:
             self.xinput_banner.grid_remove()
 
     def _on_active_game_changed(self) -> None:
+        self._clear_model_info_diff_cache()
         self.set_language()
         self._update_game_controls()
         self.refresh_all()
@@ -453,6 +473,9 @@ class ModManagerApp:
 
     def close(self) -> None:
         self._save_layout_config()
+        self._model_info_diff_shutdown = True
+        for _index in range(self._model_info_diff_worker_count):
+            self._model_info_diff_queue.put((9999, next(self._model_info_diff_counter), "", "", ""))
         self.root.destroy()
 
     # -- drag & drop ----------------------------------------------------------
@@ -557,6 +580,34 @@ class ModManagerApp:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def set_model_info_diff_enabled(self, enabled: bool) -> None:
+        self.core.set_model_info_diff_enabled(enabled)
+        self.preview_panel.set_model_info_diff_enabled(enabled)
+        mod_id = self.mod_list.get_selected_mod_id()
+        self._sync_preview(mod_id)
+
+    def prioritize_model_info_diff(self, target: str) -> None:
+        if not self.core.config.model_info_diff_enabled:
+            return
+        mod_id = self.mod_list.get_selected_mod_id()
+        if not mod_id:
+            return
+        self._schedule_model_info_diffs(mod_id, [target], priority=MODEL_INFO_DIFF_PRIORITY_HOVER)
+
+    def model_info_diff_for_tooltip(self, target: str) -> dict[str, object] | None:
+        if not self.core.config.model_info_diff_enabled:
+            return None
+        mod_id = self.mod_list.get_selected_mod_id()
+        if not mod_id:
+            return None
+        if not costumes.is_model_info_target(target):
+            return None
+        entry = self._model_info_diff_entry_for_target(mod_id, target)
+        if entry.get("status") == "queued":
+            self._schedule_model_info_diffs(mod_id, [target], priority=MODEL_INFO_DIFF_PRIORITY_HOVER)
+            entry = self._model_info_diff_entry_for_target(mod_id, target)
+        return entry
+
     def import_paths(self, paths: Iterable[Path]) -> None:
         if self.busy:
             self.log_panel.info(self.translator.t("task_busy"))
@@ -659,6 +710,7 @@ class ModManagerApp:
         if not proceed:
             return
         self.core.delete_mod(mod_id)
+        self._clear_model_info_diff_cache(mod_id)
         self.refresh_all()
         self.log_panel.info(self.translator.t("deleted_mod", name=mod["name"]))
 
@@ -702,7 +754,15 @@ class ModManagerApp:
         preview_path = None
         if mod and mod.get("preview"):
             preview_path = self.core.absolute_data_path(mod.get("preview"))
-        self.preview_panel.show(mod, preview_path, self._costume_conflicts_for_mod(mod_id))
+        model_info_diffs = {}
+        if mod_id and self.core.config.model_info_diff_enabled:
+            model_info_diffs = self._model_info_active_entries_for_mod(mod_id)
+        self.preview_panel.show(
+            mod,
+            preview_path,
+            self._costume_conflicts_for_mod(mod_id),
+            model_info_diffs,
+        )
 
     def _sync_conflict_highlight(self, mod_id: str | None) -> None:
         partners: set[str] = set()
@@ -772,6 +832,144 @@ class ModManagerApp:
                 }
         return result
 
+    # -- model-info diff workers --------------------------------------------
+
+    def _start_model_info_diff_workers(self) -> None:
+        for index in range(self._model_info_diff_worker_count):
+            thread = threading.Thread(
+                target=self._model_info_diff_worker,
+                name=f"model-info-diff-{index + 1}",
+                daemon=True,
+            )
+            thread.start()
+
+    def _model_info_diff_worker(self) -> None:
+        while True:
+            priority, _counter, game_id, mod_id, target = self._model_info_diff_queue.get()
+            try:
+                if self._model_info_diff_shutdown:
+                    return
+                if not game_id or not mod_id or not target:
+                    continue
+                cache_key = self._model_info_diff_cache_key(game_id, mod_id, target)
+                if game_id != self.core.game_id:
+                    with self._model_info_diff_lock:
+                        self._model_info_diff_pending.discard(cache_key)
+                    continue
+                with self._model_info_diff_lock:
+                    if cache_key in self._model_info_diff_cache:
+                        continue
+                diff = self.core.model_info_diff_for_target(mod_id, target)
+                if diff is None:
+                    diff = {"status": "error", "error": self.core.t("model_info_diff_source_missing")}
+                with self._model_info_diff_lock:
+                    self._model_info_diff_cache[cache_key] = diff
+                    self._model_info_diff_pending.discard(cache_key)
+                self.queue.put(("model_info_diff_done", {"game_id": game_id, "mod_id": mod_id, "target": target}))
+            finally:
+                self._model_info_diff_queue.task_done()
+
+    def _model_info_targets_for_mod(self, mod_id: str) -> list[str]:
+        mod = self.core.state["mods"].get(mod_id)
+        if not mod:
+            return []
+        return [target for target in mod.get("files", []) if costumes.is_model_info_target(target)]
+
+    def _next_unscheduled_model_info_targets(self, mod_id: str, limit: int) -> list[str]:
+        game_id = self.core.game_id
+        if not game_id or limit <= 0:
+            return []
+        result: list[str] = []
+        for target in self._model_info_targets_for_mod(mod_id):
+            cache_key = self._model_info_diff_cache_key(game_id, mod_id, target)
+            with self._model_info_diff_lock:
+                unavailable = cache_key in self._model_info_diff_cache or cache_key in self._model_info_diff_pending
+            if unavailable:
+                continue
+            result.append(target)
+            if len(result) >= limit:
+                break
+        return result
+
+    def _schedule_model_info_diffs(
+        self,
+        mod_id: str,
+        targets: Iterable[str] | None = None,
+        priority: int = MODEL_INFO_DIFF_PRIORITY_SELECTED,
+    ) -> int:
+        game_id = self.core.game_id
+        if not game_id:
+            return 0
+        target_list = list(targets) if targets is not None else self._model_info_targets_for_mod(mod_id)
+        scheduled = 0
+        for target in target_list:
+            if not costumes.is_model_info_target(target):
+                continue
+            cache_key = self._model_info_diff_cache_key(game_id, mod_id, target)
+            enqueue = False
+            with self._model_info_diff_lock:
+                if cache_key in self._model_info_diff_cache:
+                    continue
+                if cache_key not in self._model_info_diff_pending:
+                    self._model_info_diff_pending.add(cache_key)
+                    enqueue = True
+                elif priority == MODEL_INFO_DIFF_PRIORITY_HOVER:
+                    enqueue = True
+            if enqueue:
+                self._model_info_diff_queue.put(
+                    (priority, next(self._model_info_diff_counter), game_id, mod_id, target)
+                )
+                scheduled += 1
+        return scheduled
+
+    def _model_info_active_entries_for_mod(self, mod_id: str) -> dict[str, dict[str, object]]:
+        game_id = self.core.game_id
+        if not game_id:
+            return {}
+        entries: dict[str, dict[str, object]] = {}
+        with self._model_info_diff_lock:
+            cache_items = list(self._model_info_diff_cache.items())
+            pending_keys = list(self._model_info_diff_pending)
+        for key, value in cache_items:
+            if key[0] == game_id and key[1] == mod_id:
+                entries[key[2]] = value
+        for key in pending_keys:
+            if key[0] == game_id and key[1] == mod_id and key[2] not in entries:
+                entries[key[2]] = {"status": "loading"}
+        return entries
+
+    def _model_info_diff_entry_for_target(self, mod_id: str, target: str) -> dict[str, object]:
+        game_id = self.core.game_id
+        if not game_id:
+            return {"status": "queued"}
+        cache_key = self._model_info_diff_cache_key(game_id, mod_id, target)
+        with self._model_info_diff_lock:
+            cached = self._model_info_diff_cache.get(cache_key)
+            pending = cache_key in self._model_info_diff_pending
+        if cached is not None:
+            return cached
+        if pending:
+            return {"status": "loading"}
+        return {"status": "queued"}
+
+    def _clear_model_info_diff_cache(self, mod_id: str | None = None) -> None:
+        with self._model_info_diff_lock:
+            if mod_id is None:
+                self._model_info_diff_cache.clear()
+                self._model_info_diff_pending.clear()
+                return
+            self._model_info_diff_cache = {
+                key: value
+                for key, value in self._model_info_diff_cache.items()
+                if key[1] != mod_id
+            }
+            self._model_info_diff_pending = {
+                key for key in self._model_info_diff_pending if key[1] != mod_id
+            }
+
+    def _model_info_diff_cache_key(self, game_id: str, mod_id: str, target: str) -> tuple[str, str, str]:
+        return (game_id, mod_id, normalize_key(target))
+
     # -- busy / logging -------------------------------------------------------
 
     def set_busy(self, busy: bool, label: str | None = None) -> None:
@@ -794,9 +992,11 @@ class ModManagerApp:
         self.queue.put(("log", message))
 
     def _poll_queue(self) -> None:
+        processed = 0
         try:
-            while True:
+            while processed < QUEUE_POLL_ITEM_LIMIT:
                 kind, payload = self.queue.get_nowait()
+                processed += 1
                 if kind == "log":
                     self.log_panel.info(str(payload))
                 elif kind == "status":
@@ -812,9 +1012,22 @@ class ModManagerApp:
                     self._update_xinput_banner()
                 elif kind == "busy":
                     self.set_busy(bool(payload))
+                elif kind == "model_info_diff_done":
+                    if isinstance(payload, dict):
+                        game_id = payload.get("game_id")
+                        mod_id = payload.get("mod_id")
+                        target = payload.get("target")
+                        if (
+                            game_id == self.core.game_id
+                            and mod_id == self.mod_list.get_selected_mod_id()
+                            and isinstance(target, str)
+                        ):
+                            diff = self._model_info_diff_entry_for_target(str(mod_id), target)
+                            self.preview_panel.update_model_info_diff_for_target(target, diff)
         except queue.Empty:
             pass
-        self.root.after(100, self._poll_queue)
+        delay = 1 if processed >= QUEUE_POLL_ITEM_LIMIT else 100
+        self.root.after(delay, self._poll_queue)
 
 
 def main() -> int:

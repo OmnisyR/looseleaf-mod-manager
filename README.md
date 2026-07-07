@@ -15,6 +15,7 @@ Looseleaf Mod Manager is a local GUI MOD manager for PC Falcom games that use th
 - Preview image binding by local drag-and-drop or URL cache, including animated WebP/GIF.
 - Enable/disable MODs, drag to edit load order, and detect file conflicts.
 - Character filtering based on detected costume/model character IDs.
+- Optional advanced `.mi` comparison against original model info files, with originals cached from `asset_common_model_info.pac` when available.
 - Back up original game files before overwriting them, then restore managed changes later.
 - Merge `t_costume.tbl`, `t_dlc.tbl`, `t_item.tbl`, and `t_shop.tbl` into the currently active game language.
 - Detect missing `xinput1_4.dll` and download it from the latest [Hinkiii/sora1looseload](https://github.com/Hinkiii/sora1looseload) Release.
@@ -80,6 +81,7 @@ All downloaded tools are runtime cache and should not be committed.
 - `config.json`: language, window layout, and registered games.
 - `games/<game_id>/mods`: normalized imported MODs and raw-source copies.
 - `games/<game_id>/backups`: original game files saved before first overwrite.
+- `games/<game_id>/model_info_cache`: original `.mi` files cached for the optional advanced comparison view.
 - `games/<game_id>/table_cache`: original `.tbl` cache for restore and repeated merges.
 - `tools`: downloaded 7-Zip, KuroTools, and other runtime tools.
 

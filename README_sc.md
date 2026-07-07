@@ -15,6 +15,7 @@ Looseleaf Mod Manager 是一个本地 GUI MOD 管理器，面向使用新版 `as
 - 支持本地拖拽或 URL 缓存绑定预览图，支持动态 WebP/GIF。
 - 支持启用/停用 MOD、拖拽调整加载顺序、检测冲突文件。
 - 支持根据识别到的角色服装/模型 ID 筛选 MOD。
+- 可选的进阶 `.mi` 对比视图，可与原始 model info 文件比较；可用时会从 `asset_common_model_info.pac` 缓存原始文件。
 - 应用前自动备份被覆盖的原始游戏文件，并可还原由管理器写入的改动。
 - 支持将 `t_costume.tbl`、`t_dlc.tbl`、`t_item.tbl`、`t_shop.tbl` 合并到当前游戏运行语言对应的表中。
 - 检测缺失的 `xinput1_4.dll`，并可从 [Hinkiii/sora1looseload](https://github.com/Hinkiii/sora1looseload) 最新 Release 下载。
@@ -80,6 +81,7 @@ dist\Looseleaf Mod Manager.exe
 - `config.json`: 语言、窗口布局、已注册游戏。
 - `games/<game_id>/mods`: 已导入 MOD 的规范化副本和原始来源备份。
 - `games/<game_id>/backups`: 首次覆盖游戏文件前保存的原始文件。
+- `games/<game_id>/model_info_cache`: 进阶 `.mi` 对比视图使用的原始模型信息缓存。
 - `games/<game_id>/table_cache`: 原始 `.tbl` 缓存，用于还原和重新合并。
 - `tools`: 自动下载的 7-Zip、KuroTools 等工具缓存。
 
