@@ -15,8 +15,8 @@ Looseleaf Mod Manager is a local GUI MOD manager for PC Falcom games that use th
 - Preview image binding by local drag-and-drop or URL cache, including animated WebP/GIF.
 - Enable/disable MODs, drag to edit load order, and detect file conflicts.
 - Character filtering based on detected costume/model character IDs.
-- Optional advanced `.mi` comparison against original model info files, with originals cached from `asset_common_model_info.pac` when available.
-- Back up original game files before overwriting them, then restore managed changes later.
+- Optional advanced `.mi` comparison against official model info files, with official files cached from `asset_common_model_info.pac` when available.
+- Apply writes loose MOD files into the game folder only; it does not modify official resources inside pac archives. The manager can clean the loose files from the last apply.
 - Merge `t_costume.tbl`, `t_dlc.tbl`, `t_item.tbl`, and `t_shop.tbl` into the currently active game language.
 - Detect missing `xinput1_4.dll` and download it from the latest [Hinkiii/sora1looseload](https://github.com/Hinkiii/sora1looseload) Release.
 - First-run language defaults to Chinese for Simplified/Traditional Chinese operating systems, otherwise English.
@@ -53,7 +53,7 @@ The executable is written to:
 dist\Looseleaf Mod Manager.exe
 ```
 
-The EXE does not bundle imported MODs, backups, game files, 7-Zip, KuroTools, or `xinput1_4.dll`. Runtime data and downloaded tools are created next to the EXE under `manager_data`.
+The EXE does not bundle imported MODs, game files, 7-Zip, KuroTools, or `xinput1_4.dll`. Runtime data and downloaded tools are created next to the EXE under `manager_data`.
 
 ## Basic Workflow
 
@@ -62,7 +62,43 @@ The EXE does not bundle imported MODs, backups, game files, 7-Zip, KuroTools, or
 3. Select the MOD and optionally bind a preview image on the right.
 4. If conflicts are reported, adjust load order. MODs are applied top-to-bottom; lower MODs overwrite earlier targets.
 5. Click `Apply`.
-6. Click `Restore Game` to undo files managed by this app.
+6. Click `Clean Applied Files` to remove loose files written by the last apply.
+
+## MI Studio (integrated model info previewer / editor)
+
+MI Studio is integrated into the Mod Manager. It previews and batch edits every
+model info (`.mi`) file. Click `MI Studio >` in the manager toolbar to close the
+manager window and open MI Studio; click `< Mod Manager` in MI Studio to switch
+back:
+
+- Enumerates all three `.mi` origins: official files inside
+  `asset_common_model_info.pac`, MOD overrides, and MOD-registered new models,
+  labelled and filterable by character/costume name.
+- Visualizes the `.mi` structure (dynamic bones, colliders, IK, locators, ...)
+  as a readable tree (collapsed by default) with field explanations. The
+  基准值 (baseline) column always shows the official pac values with diff
+  highlighting, and an optional 参考值 (reference) column can show any mod
+  that provides the file; editing itself starts from the effective file
+  (mods win over pac).
+- Values are edited via sliders or direct input; left/right symmetric entries
+  are linked by default and can be unlinked for individual tweaks. Frequently
+  used fields can be starred — favorites are pinned at the top of the tree
+  for every mi file and remain editable there.
+- Files can be organized into custom groups; an edit can target a single file,
+  the multi-selection, or a whole group. Whole sections (e.g. DynamicBone) can
+  also be imported from any other `.mi`, including external files.
+- All edits are stored in a single shared MOD (`mi-studio-tweaks`, "MI Studio
+  参数调整") pinned to the bottom of the load order so it wins every conflict.
+  Click "应用到游戏" (Apply) to deploy through the manager's own apply logic.
+
+Run the manager with:
+
+```bat
+.venv\Scripts\python.exe mod_manager.py
+```
+
+`mi_studio.py` / `run_mi_studio.bat` can still start the same integrated program
+with MI Studio as the first screen. Add and select the game in the manager first.
 
 ## Automatic Tool Downloads
 
@@ -80,23 +116,22 @@ All downloaded tools are runtime cache and should not be committed.
 
 - `config.json`: language, window layout, and registered games.
 - `games/<game_id>/mods`: normalized imported MODs and raw-source copies.
-- `games/<game_id>/backups`: original game files saved before first overwrite.
 - `games/<game_id>/model_info_cache`: original `.mi` files cached for the optional advanced comparison view.
-- `games/<game_id>/table_cache`: original `.tbl` cache for restore and repeated merges.
+- `games/<game_id>/table_cache`: official `.tbl` cache used for table merging.
 - `tools`: downloaded 7-Zip, KuroTools, and other runtime tools.
 
-To fully reset the manager, restore game files from the GUI first, close the app, then delete `manager_data`.
+To fully reset the manager, click `Clean Applied Files` in the GUI first, close the app, then delete `manager_data`.
 
 ## Tests
 
 ```bat
 .venv\Scripts\python.exe -m unittest discover -s tests -v
-python -m compileall -q modmanager tests
+python -m compileall -q modmanager mistudio tests
 ```
 
 ## Publishing Notes
 
-- Do not commit `.venv`, `manager_data`, `__pycache__`, imported MODs, backups, generated EXE files, or downloaded tools.
+- Do not commit `.venv`, `manager_data`, `__pycache__`, imported MODs, generated EXE files, or downloaded tools.
 - Packaged EXE builds can be uploaded to GitHub Releases separately.
 - Third-party tools are downloaded at runtime; list their upstream projects in release notes.
 - This repository does not include game assets or third-party binaries.

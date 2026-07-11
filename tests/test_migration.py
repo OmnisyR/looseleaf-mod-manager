@@ -12,7 +12,6 @@ class LegacyMigrationTests(unittest.TestCase):
     def _build_flat_layout(self, data_home: Path) -> None:
         (data_home / "mods" / "somemod" / "files").mkdir(parents=True)
         (data_home / "mods" / "somemod" / "files" / "x.mdl").write_bytes(b"model")
-        (data_home / "backups" / "asset").mkdir(parents=True)
         (data_home / "table_cache").mkdir()
         (data_home / "tools").mkdir()  # global — must NOT move
         (data_home / "state.json").write_text('{"mods":{},"order":[]}', encoding="utf-8")
@@ -34,7 +33,6 @@ class LegacyMigrationTests(unittest.TestCase):
             self.assertEqual(game_id, "sora_1st")
             game_dir = data_home / "games" / "sora_1st"
             self.assertTrue((game_dir / "mods" / "somemod" / "files" / "x.mdl").exists())
-            self.assertTrue((game_dir / "backups" / "asset").exists())
             self.assertTrue((game_dir / "state.json").exists())
             self.assertFalse((data_home / "state.json").exists())
             # tools stays global
@@ -116,12 +114,10 @@ class LegacyMigrationTests(unittest.TestCase):
             nested = game_dir / "mods" / "mods" / "mymod" / "files"
             nested.mkdir(parents=True)
             (nested / "x.mdl").write_bytes(b"M")
-            (game_dir / "backups" / "backups" / "a").mkdir(parents=True)
 
             self.assertTrue(repair_nested_game_data(game_dir))
             self.assertTrue((game_dir / "mods" / "mymod" / "files" / "x.mdl").exists())
             self.assertFalse((game_dir / "mods" / "mods").exists())
-            self.assertFalse((game_dir / "backups" / "backups").exists())
             # second run is a no-op
             self.assertFalse(repair_nested_game_data(game_dir))
 

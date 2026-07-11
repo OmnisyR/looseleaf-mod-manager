@@ -11,6 +11,8 @@ from ..i18n import Translator
 from .tooltip import ToolTip
 
 DRAG_HANDLE = "⠿"
+DRAG_AUTOSCROLL_MARGIN = 42
+DRAG_AUTOSCROLL_INTERVAL_MS = 90
 
 
 class ModListPanel(ttk.Frame):
@@ -27,6 +29,7 @@ class ModListPanel(ttk.Frame):
         on_move: Callable[[str, int], None],
         on_delete: Callable[[str], None],
         on_open_data_dir: Callable[[], None],
+        on_add_cel_shading_patch: Callable[[str], None],
         on_reorder: Callable[[list[str]], None],
     ) -> None:
         super().__init__(parent, style="Panel.TFrame")
@@ -37,6 +40,7 @@ class ModListPanel(ttk.Frame):
         self.on_move = on_move
         self.on_delete = on_delete
         self.on_open_data_dir = on_open_data_dir
+        self.on_add_cel_shading_patch = on_add_cel_shading_patch
         self.on_reorder = on_reorder
         self.selected_mod_id: str | None = None
         self.dragging_iid: str | None = None
@@ -51,6 +55,9 @@ class ModListPanel(ttk.Frame):
         self._drag_offset_x = 0
         self._drag_offset_y = 0
         self._press_y = 0
+        self._drag_last_y = 0
+        self._drag_autoscroll_job: str | None = None
+        self._drag_autoscroll_direction = 0
         self._base_tags: dict[str, list[str]] = {}
         self._partner_ids: set[str] = set()
         self._last_mods: dict[str, dict] = {}
@@ -199,6 +206,11 @@ class ModListPanel(ttk.Frame):
     def _request_open_data_dir(self) -> None:
         self.on_open_data_dir()
 
+    def _request_add_cel_shading_patch(self) -> None:
+        mod_id = self.get_selected_mod_id()
+        if mod_id:
+            self.on_add_cel_shading_patch(mod_id)
+
     def _select_iid(self, iid: str, notify: bool = True, see: bool = False) -> None:
         if not iid or not self.tree.exists(iid):
             return
@@ -248,12 +260,17 @@ class ModListPanel(ttk.Frame):
     def _rebuild_context_menu(self) -> None:
         self.context_menu.delete(0, tk.END)
         self.context_menu.add_command(label=self.translator.t("toggle"), command=self._request_toggle)
+        self.context_menu.add_command(
+            label=self.translator.t("add_cel_shading_patch"),
+            command=self._request_add_cel_shading_patch,
+        )
         self.context_menu.add_separator()
         self.context_menu.add_command(label=self.translator.t("delete"), command=self._request_delete)
         self.context_menu.add_command(label=self.translator.t("open_data_dir"), command=self._request_open_data_dir)
 
     def _show_context_menu(self, event: object) -> str:
         self._tooltip.hide()
+        self._stop_drag_autoscroll()
         iid = self.tree.identify_row(event.y)
         if not iid:
             return "break"
@@ -279,25 +296,27 @@ class ModListPanel(ttk.Frame):
     def _on_drag(self, event: object) -> None:
         if not self.dragging_iid:
             return
+        self._drag_last_y = int(getattr(event, "y", 0))
         if not self.dragging_started:
             if abs(event.y - self._press_y) < 4:
                 return
             self.dragging_started = True
             self._begin_drag_visual(event)
         self._move_drag_ghost(event)
+        self._update_drag_autoscroll(self._drag_last_y)
 
         target_iid = self.tree.identify_row(event.y)
-        if not target_iid or target_iid == self.dragging_last_target:
+        target_key = f"{target_iid}:before" if target_iid else None
+        if not target_iid or target_key == self.dragging_last_target:
             return
-        self.dragging_last_target = target_iid
+        self.dragging_last_target = target_key
         if target_iid == self.dragging_iid:
             return
-        children = list(self.tree.get_children())
-        target_index = children.index(target_iid)
-        self.tree.move(self.dragging_iid, "", target_index)
+        self._move_dragged_to_target(target_iid)
         self._hide_selection_indicator()
 
     def _on_release(self, _event: object) -> None:
+        self._stop_drag_autoscroll()
         if self.dragging_started and self.dragging_iid:
             self._restore_dragged_row()
             self._destroy_drag_ghost()
@@ -308,6 +327,71 @@ class ModListPanel(ttk.Frame):
         self._drag_values = None
         self._drag_tags = None
         self._schedule_selection_bar_update()
+
+    def _move_dragged_to_target(self, target_iid: str, after: bool = False) -> None:
+        if not self.dragging_iid or target_iid == self.dragging_iid or not self.tree.exists(target_iid):
+            return
+        children = [iid for iid in self.tree.get_children() if iid != self.dragging_iid]
+        if target_iid not in children:
+            return
+        target_index = children.index(target_iid) + (1 if after else 0)
+        self.tree.move(self.dragging_iid, "", target_index)
+
+    def _update_drag_autoscroll(self, y: int) -> None:
+        if not self.dragging_started:
+            self._stop_drag_autoscroll()
+            return
+        height = max(1, self.tree.winfo_height())
+        if y < DRAG_AUTOSCROLL_MARGIN:
+            direction = -1
+        elif y > height - DRAG_AUTOSCROLL_MARGIN:
+            direction = 1
+        else:
+            direction = 0
+        if direction == 0:
+            self._stop_drag_autoscroll()
+            return
+        self._drag_autoscroll_direction = direction
+        if self._drag_autoscroll_job is None:
+            self._run_drag_autoscroll()
+
+    def _stop_drag_autoscroll(self) -> None:
+        self._drag_autoscroll_direction = 0
+        if self._drag_autoscroll_job is None:
+            return
+        try:
+            self.after_cancel(self._drag_autoscroll_job)
+        except tk.TclError:
+            pass
+        self._drag_autoscroll_job = None
+
+    def _run_drag_autoscroll(self) -> None:
+        self._drag_autoscroll_job = None
+        if not self.dragging_started or not self.dragging_iid or self._drag_autoscroll_direction == 0:
+            return
+        first, last = self.tree.yview()
+        if self._drag_autoscroll_direction < 0 and first <= 0.0:
+            self._drag_autoscroll_direction = 0
+            return
+        if self._drag_autoscroll_direction > 0 and last >= 1.0:
+            self._drag_autoscroll_direction = 0
+            return
+        self.tree.yview_scroll(self._drag_autoscroll_direction, "units")
+        self._schedule_selection_bar_update()
+        height = max(1, self.tree.winfo_height())
+        probe_y = 1 if self._drag_autoscroll_direction < 0 else height - 2
+        target_iid = self.tree.identify_row(probe_y)
+        if not target_iid:
+            children = list(self.tree.get_children())
+            target_iid = children[0] if self._drag_autoscroll_direction < 0 and children else children[-1] if children else ""
+        if target_iid:
+            after = self._drag_autoscroll_direction > 0
+            target_key = f"{target_iid}:{'after' if after else 'before'}"
+            if target_key != self.dragging_last_target:
+                self.dragging_last_target = target_key
+                self._move_dragged_to_target(target_iid, after=after)
+                self._hide_selection_indicator()
+        self._drag_autoscroll_job = self.after(DRAG_AUTOSCROLL_INTERVAL_MS, self._run_drag_autoscroll)
 
     def _begin_drag_visual(self, event: object) -> None:
         if not self.dragging_iid:
@@ -442,6 +526,7 @@ class ModListPanel(ttk.Frame):
         conflict_roles: dict[str, dict[str, int]] | None = None,
         keep_selection: str | None = None,
     ) -> None:
+        self._stop_drag_autoscroll()
         self._destroy_drag_ghost()
         self._tooltip.hide()
         self._hover_iid = None

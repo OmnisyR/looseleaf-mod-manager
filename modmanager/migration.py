@@ -10,7 +10,6 @@ from .games import GameProfile, detect_profile, looks_like_game_dir
 # Per-game data that lived directly under manager_data/ in the old single-game layout.
 _LEGACY_GAME_ITEMS = (
     "mods",
-    "backups",
     "table_cache",
     "_generated",
     "_staging",
@@ -20,7 +19,7 @@ _LEGACY_GAME_ITEMS = (
 )
 
 # Per-game subdirectories that must never end up nested (e.g. mods/mods/...).
-_NESTABLE_DIRS = ("mods", "backups", "table_cache", "_generated", "_staging")
+_NESTABLE_DIRS = ("mods", "table_cache", "_generated", "_staging")
 
 
 def _safe_move(source: Path, destination: Path) -> None:

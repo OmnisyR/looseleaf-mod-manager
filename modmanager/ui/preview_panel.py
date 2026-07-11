@@ -183,6 +183,7 @@ class PreviewPanel(ttk.Frame):
         super().__init__(parent, style="Panel.TFrame")
         self.colors = colors
         self.translator = translator
+        self._closed = False
         self.animation_job: str | None = None
         self.frames: list[ImageTk.PhotoImage] = []
         self.frame_durations: list[int] = []
@@ -203,7 +204,7 @@ class PreviewPanel(ttk.Frame):
         self._visible_model_info_job: str | None = None
         self._asset_filter_key = "costumes"
         self._asset_filter_options: list[tuple[str, str]] = []
-        self._model_info_diff_var = tk.BooleanVar(value=model_info_diff_enabled)
+        self._model_info_diff_var: tk.BooleanVar | None = tk.BooleanVar(value=model_info_diff_enabled)
         self._on_model_info_diff_toggle = on_model_info_diff_toggle
         self._on_model_info_hover = on_model_info_hover
         self._get_model_info_diff = get_model_info_diff
@@ -344,12 +345,16 @@ class PreviewPanel(ttk.Frame):
         self._refresh_costume_tree(self._pending_mod)
 
     def _on_model_info_diff_changed(self) -> None:
+        if self._closed or self._model_info_diff_var is None:
+            return
         if self._on_model_info_diff_toggle is not None:
             self._on_model_info_diff_toggle(bool(self._model_info_diff_var.get()))
         else:
             self._refresh_costume_tree(self._pending_mod)
 
     def set_model_info_diff_enabled(self, enabled: bool) -> None:
+        if self._closed or self._model_info_diff_var is None:
+            return
         self._model_info_diff_var.set(bool(enabled))
         if enabled:
             self._schedule_visible_model_info_rows()
@@ -456,7 +461,9 @@ class PreviewPanel(ttk.Frame):
         self._schedule_visible_model_info_rows()
 
     def _schedule_visible_model_info_rows(self) -> None:
-        if not self._model_info_diff_var.get() or not self._model_info_iid_targets:
+        if self._closed:
+            return
+        if self._model_info_diff_var is None or not self._model_info_diff_var.get() or not self._model_info_iid_targets:
             return
         if self._visible_model_info_job is not None:
             try:
@@ -467,7 +474,9 @@ class PreviewPanel(ttk.Frame):
 
     def _request_visible_model_info_rows(self) -> None:
         self._visible_model_info_job = None
-        if not self._model_info_diff_var.get():
+        if self._closed:
+            return
+        if self._model_info_diff_var is None or not self._model_info_diff_var.get():
             return
         for iid in self._visible_model_info_iids():
             self._dynamic_model_info_diff_for_iid(iid)
@@ -764,12 +773,16 @@ class PreviewPanel(ttk.Frame):
         return f"{number:+d}"
 
     def _on_configure(self, _event: object) -> None:
+        if self._closed:
+            return
         if self._resize_job is not None:
             self.canvas.after_cancel(self._resize_job)
         self._resize_job = self.canvas.after(RESIZE_DEBOUNCE_MS, self._on_resize_settled)
 
     def _on_resize_settled(self) -> None:
         self._resize_job = None
+        if self._closed:
+            return
         width = max(self.canvas.winfo_width(), 320)
         height = max(self.canvas.winfo_height(), 220)
         if (width, height) == self._last_rendered_size:
@@ -910,6 +923,8 @@ class PreviewPanel(ttk.Frame):
         return frames, durations
 
     def _schedule_next_frame(self) -> None:
+        if self._closed:
+            return
         if len(self.frames) <= 1 or self.canvas_image_id is None:
             return
         delay = self.frame_durations[self.frame_index]
@@ -917,6 +932,8 @@ class PreviewPanel(ttk.Frame):
 
     def _advance_frame(self) -> None:
         self.animation_job = None
+        if self._closed:
+            return
         if len(self.frames) <= 1 or self.canvas_image_id is None:
             return
         self.frame_index = (self.frame_index + 1) % len(self.frames)
@@ -932,3 +949,38 @@ class PreviewPanel(ttk.Frame):
         except tk.TclError:
             pass
         self.animation_job = None
+
+    def shutdown(self) -> None:
+        self._closed = True
+        self._costume_tooltip.hide()
+        if self._model_info_diff_var is not None:
+            try:
+                self.model_info_diff_check.configure(variable="")
+            except tk.TclError:
+                pass
+            self._model_info_diff_var = None
+        if self._visible_model_info_job is not None:
+            try:
+                self.after_cancel(self._visible_model_info_job)
+            except tk.TclError:
+                pass
+            self._visible_model_info_job = None
+        if self._resize_job is not None:
+            try:
+                self.canvas.after_cancel(self._resize_job)
+            except tk.TclError:
+                pass
+            self._resize_job = None
+        self._cancel_animation()
+        try:
+            self.canvas.delete("all")
+        except tk.TclError:
+            pass
+        self.frames.clear()
+        self.frame_durations.clear()
+        self.current_image = None
+        self.canvas_image_id = None
+        self._checker_cache = None
+        self._frame_cache.clear()
+        if hasattr(self, "checker_image"):
+            self.checker_image = None

@@ -9,10 +9,12 @@ import struct
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 from PIL import Image
 
 from mod_manager import ModManagerCore
+from modmanager.cel_shading import CelShadingPatchResult
 
 
 class QuietSimpleHTTPRequestHandler(SimpleHTTPRequestHandler):
@@ -128,7 +130,6 @@ class CoreSmokeTests(unittest.TestCase):
                             }
                         },
                         "order": [mod_id],
-                        "backups": {},
                         "last_applied_targets": [old_target],
                     }
                 ),
@@ -174,6 +175,61 @@ class CoreSmokeTests(unittest.TestCase):
 
             core.apply_enabled()
             self.assertEqual((core.game_root / "asset/common/model/same.mdl").read_bytes(), b"first")
+
+    def test_cel_shading_patch_record_is_created_after_target(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            temp_root = Path(raw_temp)
+            core = self.make_core(temp_root)
+
+            mod_source = temp_root / "cel_target"
+            mod_source.mkdir()
+            (mod_source / "chr5000_c20.mdl").write_bytes(b"model")
+            target_id = core.import_path(mod_source)
+            target_file = "asset/common/model/chr5000_c20.mdl"
+
+            def fake_generate(**kwargs: object) -> CelShadingPatchResult:
+                patch_dir = kwargs["patch_dir"]
+                self.assertIsInstance(patch_dir, Path)
+                output = patch_dir / "files" / "asset" / "common" / "model" / "chr5000_c20.mdl"
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_bytes(b"cel")
+                return CelShadingPatchResult(
+                    generated_files=[target_file],
+                    changed_material_count=1,
+                    changed_names={"body_skin": 1},
+                    skipped=[],
+                )
+
+            with mock.patch("modmanager.core.generate_cel_shading_patch_files", side_effect=fake_generate) as generate:
+                result = core.generate_cel_shading_patch(target_id)
+                patch_id = str(result["patch_id"])
+
+                self.assertEqual(core.state["order"], [target_id, patch_id])
+                self.assertEqual(core.state["mods"][patch_id]["cel_shading_target_id"], target_id)
+                self.assertEqual(core.state["mods"][patch_id]["files"], [target_file])
+                self.assertTrue((core.mod_files_root(patch_id) / "asset/common/model/chr5000_c20.mdl").exists())
+
+                second = core.generate_cel_shading_patch(target_id)
+                self.assertEqual(second["patch_id"], patch_id)
+                self.assertEqual(core.state["order"].count(patch_id), 1)
+                self.assertEqual(len(core.state["mods"]), 2)
+                self.assertEqual(generate.call_count, 2)
+
+    def test_apply_does_not_create_game_file_backups(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            temp_root = Path(raw_temp)
+            core = self.make_core(temp_root)
+
+            mod_source = temp_root / "loose_mod"
+            mod_source.mkdir()
+            (mod_source / "hero.mdl").write_bytes(b"model")
+            core.import_path(mod_source)
+
+            core.apply_enabled()
+
+            self.assertFalse((core.game_data_dir / "backups").exists())
+            state = json.loads(core.state_file.read_text(encoding="utf-8"))
+            self.assertNotIn("backups", state)
 
     def test_table_files_are_normalized_and_language_deduplicated(self) -> None:
         with tempfile.TemporaryDirectory() as raw_temp:
@@ -348,6 +404,34 @@ class CoreSmokeTests(unittest.TestCase):
             self.assertIsNotNone(diff)
             self.assertEqual(diff["status"], "missing_original")
             self.assertTrue(cache_path.exists())
+
+    def test_model_info_diff_uses_prior_mod_for_added_model_info(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            temp_root = Path(raw_temp)
+            core = self.make_core(temp_root)
+            target = "asset/common/model_info/new_costume.mi"
+            base = b"JSON\0\0\0\0\0\0\0\0\0\0\0\0Root\0AddedModelInfo\0Base\0"
+            modified = b"JSON\0\0\0\0\0\0\0\0\0\0\0\0Root\0AddedModelInfo\0Modified\0"
+
+            base_source = temp_root / "base_added_model_info"
+            base_source.mkdir()
+            (base_source / "new_costume.mi").write_bytes(base)
+            base_id = core.import_path(base_source)
+
+            override_source = temp_root / "override_added_model_info"
+            override_source.mkdir()
+            (override_source / "new_costume.mi").write_bytes(modified)
+            override_id = core.import_path(override_source)
+
+            base_diff = core.model_info_diff_for_target(base_id, target)
+            self.assertIsNotNone(base_diff)
+            self.assertEqual(base_diff["status"], "missing_original")
+
+            override_diff = core.model_info_diff_for_target(override_id, target)
+            self.assertIsNotNone(override_diff)
+            self.assertEqual(override_diff["status"], "changed")
+            self.assertEqual(override_diff["original_size"], len(base))
+            self.assertEqual(override_diff["modified_size"], len(modified))
 
     def test_config_persists_language_and_window_layout(self) -> None:
         with tempfile.TemporaryDirectory() as raw_temp:

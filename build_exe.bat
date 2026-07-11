@@ -19,6 +19,9 @@ if errorlevel 1 exit /b %errorlevel%
     --windowed ^
     --name "Looseleaf Mod Manager" ^
     --collect-data tkinterdnd2 ^
+    --hidden-import blowfish ^
+    --hidden-import numpy ^
+    --hidden-import xxhash ^
     --hidden-import zstandard ^
     mod_manager.py
 

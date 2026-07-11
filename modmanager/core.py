@@ -12,6 +12,7 @@ from typing import Callable
 from PIL import Image
 
 from .archives import ArchiveExtractor
+from .cel_shading import generate_cel_shading_patch_files
 from .config import ManagerConfig
 from .constants import (
     APP_DIR,
@@ -95,7 +96,6 @@ class ModManagerCore:
     def _clear_game_paths(self) -> None:
         self.game_data_dir: Path | None = None
         self.mods_dir: Path | None = None
-        self.backups_dir: Path | None = None
         self.model_info_cache_dir: Path | None = None
         self.table_cache_dir: Path | None = None
         self.generated_dir: Path | None = None
@@ -109,7 +109,6 @@ class ModManagerCore:
         game_data = self.games_dir / game_id
         self.game_data_dir = game_data
         self.mods_dir = game_data / "mods"
-        self.backups_dir = game_data / "backups"
         self.model_info_cache_dir = game_data / "model_info_cache"
         self.table_cache_dir = game_data / "table_cache"
         self.generated_dir = game_data / "_generated"
@@ -119,7 +118,6 @@ class ModManagerCore:
         for directory in (
             game_data,
             self.mods_dir,
-            self.backups_dir,
             self.model_info_cache_dir,
             self.table_cache_dir,
             self.generated_dir,
@@ -261,7 +259,6 @@ class ModManagerCore:
             "created_at": now_label(),
             "mods": {},
             "order": [],
-            "backups": {},
             "last_applied_targets": [],
         }
 
@@ -278,9 +275,12 @@ class ModManagerCore:
         state.setdefault("version", 1)
         state.setdefault("mods", {})
         state.setdefault("order", [])
-        state.setdefault("backups", {})
         state.setdefault("last_applied_targets", [])
-        state_changed = False
+        if "backups" in state:
+            state.pop("backups", None)
+            state_changed = True
+        else:
+            state_changed = False
         known_ids = set(state["mods"])
         state["order"] = [mod_id for mod_id in state["order"] if mod_id in known_ids]
         for mod_id in sorted(known_ids - set(state["order"])):
@@ -367,7 +367,7 @@ class ModManagerCore:
 
     def relative_data_path(self, path: Path) -> str:
         # Paths are stored relative to the active game's data dir, so a game's
-        # mods/backups stay valid regardless of the manager_data root.
+        # imported mods stay valid regardless of the manager_data root.
         return posix_path(path.resolve().relative_to(self.game_data_dir.resolve()))
 
     def absolute_data_path(self, stored: str | None) -> Path | None:
@@ -404,6 +404,8 @@ class ModManagerCore:
             return {"status": "error", "error": self.t("model_info_diff_source_missing")}
         try:
             original = self.read_original_model_info_bytes(target_text)
+            if original is None:
+                original = self.read_prior_mod_model_info_bytes(mod_id, target_text)
             return compare_model_info(original, source.read_bytes()).to_dict()
         except Exception as exc:
             return {"status": "error", "error": str(exc)}
@@ -413,6 +415,36 @@ class ModManagerCore:
         if cached and cached.exists():
             return cached.read_bytes()
         return None
+
+    def read_prior_mod_model_info_bytes(self, mod_id: str, target_text: str) -> bytes | None:
+        """Return the effective enabled MOD file immediately before *mod_id*.
+
+        Official pac bytes remain the preferred comparison base. This fallback
+        covers mod-added .mi files where a later MOD overrides the same new file.
+        """
+        if not self.mods_dir:
+            return None
+        target_key = normalize_key(target_text)
+        prior_source: Path | None = None
+        for ordered_id in self.state.get("order", []):
+            if ordered_id == mod_id:
+                break
+            mod = self.state.get("mods", {}).get(ordered_id)
+            if not mod or not mod.get("enabled", True):
+                continue
+            for candidate_text in mod.get("files", []):
+                if normalize_key(candidate_text) != target_key:
+                    continue
+                candidate = self.mod_files_root(ordered_id) / Path(*PurePosixPath(candidate_text).parts)
+                if candidate.exists():
+                    prior_source = candidate
+                break
+        if prior_source is None:
+            return None
+        try:
+            return prior_source.read_bytes()
+        except OSError:
+            return None
 
     def cache_original_model_info(self, target_text: str) -> Path | None:
         if not self.game_root or not self.model_info_cache_dir:
@@ -758,7 +790,117 @@ class ModManagerCore:
             shutil.rmtree(mod_dir)
         self.save()
 
-    # -- apply / restore ------------------------------------------------------
+    # -- cel shading patch ---------------------------------------------------
+
+    def generate_cel_shading_patch(
+        self,
+        target_id: str,
+        log: Callable[[str], None] | None = None,
+    ) -> dict[str, object]:
+        logger = log or (lambda _message: None)
+        if not self.has_active_game or not self.game_root or not self.mods_dir:
+            raise ManagerError(self.t("no_active_game"))
+        with self._lock:
+            target = self.state["mods"].get(target_id)
+            if not target:
+                raise ManagerError(self.t("cel_shading_missing_target_mod", id=target_id))
+
+            target_name = target.get("name") or target_id
+            existing_patch_id = self._find_cel_shading_patch(target_id)
+            patch_id = existing_patch_id or self._new_cel_shading_patch_id(str(target_name))
+            patch_name = self._cel_shading_patch_name(target_id, str(target_name), existing_patch_id)
+            patch_dir = self.mods_dir / patch_id
+            logger(self.t("cel_shading_started", name=target_name))
+
+            try:
+                result = generate_cel_shading_patch_files(
+                    target_files=list(target.get("files", [])),
+                    target_files_dir=self.mod_files_root(target_id),
+                    patch_dir=patch_dir,
+                    game_root=self.game_root,
+                    tools_dir=self.tools_dir,
+                    log=logger,
+                    tr=self.t,
+                )
+            except Exception:
+                if existing_patch_id is None and patch_dir.exists():
+                    shutil.rmtree(patch_dir, ignore_errors=True)
+                raise
+
+            patch = self.state["mods"].get(patch_id)
+            if patch is None:
+                patch = {
+                    "id": patch_id,
+                    "name": patch_name,
+                    "created_at": now_label(),
+                    "table_sources": [],
+                    "preview": None,
+                    "raw_source": None,
+                }
+                self.state["mods"][patch_id] = patch
+                self._insert_mod_after(target_id, patch_id)
+            elif patch_id not in self.state["order"]:
+                self.state["order"].append(patch_id)
+
+            patch["name"] = patch.get("name") or patch_name
+            patch["enabled"] = True
+            patch["source"] = self.t("cel_shading_patch_source", target=target_name)
+            patch["files"] = result.generated_files
+            patch["table_sources"] = []
+            patch["cel_shading_target_id"] = target_id
+            patch["generated_by"] = "cel_shading_patch"
+            self.save()
+            return {
+                "target_id": target_id,
+                "patch_id": patch_id,
+                "patch_name": patch.get("name", patch_name),
+                "files": len(result.generated_files),
+                "materials": result.changed_material_count,
+                "skipped": len(result.skipped),
+            }
+
+    def _find_cel_shading_patch(self, target_id: str) -> str | None:
+        legacy_marker = f"Generated material cel-shading patch for {target_id};"
+        for mod_id in self.state.get("order", []):
+            mod = self.state.get("mods", {}).get(mod_id)
+            if not mod:
+                continue
+            if mod.get("cel_shading_target_id") == target_id:
+                return mod_id
+            if legacy_marker in str(mod.get("source") or ""):
+                return mod_id
+        for mod_id, mod in self.state.get("mods", {}).items():
+            if mod.get("cel_shading_target_id") == target_id:
+                return mod_id
+            if legacy_marker in str(mod.get("source") or ""):
+                return mod_id
+        return None
+
+    def _new_cel_shading_patch_id(self, target_name: str) -> str:
+        patch_name = self.t("cel_shading_patch_name", name=target_name)
+        return f"{slugify(patch_name)}-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+
+    def _cel_shading_patch_name(
+        self,
+        target_id: str,
+        target_name: str,
+        existing_patch_id: str | None,
+    ) -> str:
+        if existing_patch_id:
+            existing = self.state["mods"].get(existing_patch_id)
+            if existing and existing.get("name"):
+                return str(existing["name"])
+        return self.t("cel_shading_patch_name", name=target_name)
+
+    def _insert_mod_after(self, target_id: str, mod_id: str) -> None:
+        order = [item for item in self.state["order"] if item != mod_id]
+        if target_id in order:
+            order.insert(order.index(target_id) + 1, mod_id)
+        else:
+            order.append(mod_id)
+        self.state["order"] = order
+
+    # -- apply / clean --------------------------------------------------------
 
     def apply_enabled(self, log: Callable[[str], None] | None = None) -> dict:
         logger = log or (lambda _message: None)
@@ -795,7 +937,6 @@ class ModManagerCore:
                     if not source.exists():
                         logger(self.t("missing_file_skipped", name=mod["name"], target=target_text))
                         continue
-                    self.ensure_backup(target_text, logger)
                     destination = self.game_root / Path(*target.parts)
                     copy_file(source, destination)
                     applied_targets.add(posix_path(target))
@@ -831,7 +972,6 @@ class ModManagerCore:
             costumes.reload_catalog()
             for mapping in table_mappings:
                 target_text = posix_path(mapping.target)
-                self.ensure_backup(target_text, logger)
                 destination = self.game_root / Path(*mapping.target.parts)
                 copy_file(mapping.source, destination)
                 applied_targets.add(target_text)
@@ -850,79 +990,39 @@ class ModManagerCore:
                 "conflicts": len(self.compute_conflicts()),
             }
 
-    def ensure_backup(self, target_text: str, log: Callable[[str], None]) -> None:
-        key = normalize_key(target_text)
-        if key in self.state["backups"]:
-            return
-        target = PurePosixPath(target_text)
-        game_file = self.game_root / Path(*target.parts)
-        backup_file = self.backups_dir / Path(*target.parts)
-        if game_file.exists():
-            copy_file(game_file, backup_file)
-            self.state["backups"][key] = {
-                "target": posix_path(target),
-                "exists": True,
-                "backup": self.relative_data_path(backup_file),
-            }
-            log(self.t("original_file_backed_up", target=target_text))
-        else:
-            self.state["backups"][key] = {
-                "target": posix_path(target),
-                "exists": False,
-                "backup": None,
-            }
-
     def restore_applied_targets(self, log: Callable[[str], None]) -> None:
         targets = list(self.state.get("last_applied_targets", []))
         if not targets:
             return
-        restored = 0
         removed = 0
         for target_text in targets:
             target = PurePosixPath(target_text)
             game_file = self.game_root / Path(*target.parts)
-            backup = self.state["backups"].get(normalize_key(target_text))
-            if backup and backup.get("exists"):
-                backup_path = self.absolute_data_path(backup.get("backup"))
-                if backup_path and backup_path.exists():
-                    copy_file(backup_path, game_file)
-                    restored += 1
-            else:
-                if game_file.exists():
-                    game_file.unlink()
-                    remove_empty_parents(game_file, self.game_root)
-                    removed += 1
+            if game_file.exists():
+                game_file.unlink()
+                remove_empty_parents(game_file, self.game_root)
+                removed += 1
         self.state["last_applied_targets"] = []
-        if restored or removed:
-            log(self.t("previous_apply_restored", restored=restored, removed=removed))
+        if removed:
+            log(self.t("previous_apply_removed", removed=removed))
 
     def restore_game(self, log: Callable[[str], None] | None = None) -> dict:
         logger = log or (lambda _message: None)
         with self._lock:
             targets = set(self.state.get("last_applied_targets", []))
-            for backup in self.state.get("backups", {}).values():
-                targets.add(backup.get("target", ""))
-            restored = 0
             removed = 0
             for target_text in sorted([target for target in targets if target], key=normalize_key):
                 target = PurePosixPath(target_text)
                 game_file = self.game_root / Path(*target.parts)
-                backup = self.state["backups"].get(normalize_key(target_text))
-                if backup and backup.get("exists"):
-                    backup_path = self.absolute_data_path(backup.get("backup"))
-                    if backup_path and backup_path.exists():
-                        copy_file(backup_path, game_file)
-                        restored += 1
-                else:
-                    if game_file.exists():
-                        game_file.unlink()
-                        remove_empty_parents(game_file, self.game_root)
-                        removed += 1
+                if game_file.exists():
+                    game_file.unlink()
+                    remove_empty_parents(game_file, self.game_root)
+                    removed += 1
             self.state["last_applied_targets"] = []
             self.clear_extra_costume_catalog()
             self.save()
-            logger(self.t("game_restored_log", restored=restored, removed=removed))
-            return {"restored": restored, "removed": removed}
+            logger(self.t("game_cleaned_log", removed=removed))
+            return {"removed": removed}
 
     def clear_extra_costume_catalog(self) -> None:
         self.extra_costume_names_file.parent.mkdir(parents=True, exist_ok=True)

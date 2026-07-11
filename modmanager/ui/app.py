@@ -4,8 +4,9 @@ import itertools
 import os
 import queue
 import threading
+import time
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -22,24 +23,41 @@ from .dnd import parse_drop_paths
 from .log_panel import LogPanel
 from .mod_list import ModListPanel
 from .preview_panel import PreviewPanel
+from .screen import sanitize_geometry_for
 from .status_bar import StatusBar
 from .theme import apply_theme
 
 MODEL_INFO_DIFF_PRIORITY_HOVER = 0
 MODEL_INFO_DIFF_PRIORITY_SELECTED = 20
+MODEL_INFO_DIFF_PRIORITY_STOP = -10_000
 QUEUE_POLL_ITEM_LIMIT = 120
 
 
 class ModManagerApp:
-    def __init__(self, root: TkinterDnD.Tk, core: ModManagerCore) -> None:
+    def __init__(
+        self,
+        root: TkinterDnD.Tk,
+        core: ModManagerCore,
+        on_open_mi_studio: Callable[[], None] | None = None,
+    ) -> None:
         self.root = root
         self.core = core
+        self.on_open_mi_studio = on_open_mi_studio
         self.translator = Translator(self.core.config.language)
         self.queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self.busy = False
+        self._closing = False
+        self._after_jobs: set[str] = set()
+        self._worker_threads: set[threading.Thread] = set()
+        self._worker_threads_lock = threading.Lock()
+        self._initial_load_pending = True
         self._status_error_pending = False
         self._conflicts_cache: list[dict] = []
-        self._last_normal_geometry = str(self.core.config.get_window_value("geometry", "1180x800"))
+        # Saved positions can point at a disconnected monitor; sanitize so the
+        # window never restores fully off-screen.
+        self._last_normal_geometry = sanitize_geometry_for(
+            root, str(self.core.config.get_window_value("geometry", "1180x800")), "1180x800"
+        )
         self._layout_ready = False
         self._layout_wait_size: tuple[int, int, int] | None = None
 
@@ -51,6 +69,7 @@ class ModManagerApp:
         self._model_info_diff_lock = threading.Lock()
         self._model_info_diff_shutdown = False
         self._model_info_diff_worker_count = 1
+        self._model_info_diff_threads: list[threading.Thread] = []
         self._start_model_info_diff_workers()
 
         self.root.geometry(self._last_normal_geometry)
@@ -59,15 +78,92 @@ class ModManagerApp:
         self._build_ui()
         self.set_language()
         self._update_game_controls()
-        self.refresh_all()
         self._update_action_states()
+        self.set_busy(True, self.translator.t("busy_initial_load"))
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.bind("<Configure>", self._on_root_configure)
-        self.root.after(120, self._restore_window_and_layout)
-        self.root.after(100, self._poll_queue)
-        self.root.after(300, self._ensure_game_selected)
+        self._schedule_after(40, self._finish_initial_load)
+        self._schedule_after(120, self._restore_window_and_layout)
+        self._schedule_after(100, self._poll_queue)
 
     # -- layout ---------------------------------------------------------------
+
+    def _schedule_after(self, delay_ms: int, callback: Callable[[], None]) -> None:
+        if self._closing:
+            return
+        job_id = ""
+
+        def run() -> None:
+            self._after_jobs.discard(job_id)
+            if self._closing:
+                return
+            callback()
+
+        try:
+            job_id = self.root.after(delay_ms, run)
+        except tk.TclError:
+            return
+        self._after_jobs.add(job_id)
+
+    def _cancel_after_jobs(self) -> None:
+        for job_id in list(self._after_jobs):
+            try:
+                self.root.after_cancel(job_id)
+            except tk.TclError:
+                pass
+            finally:
+                self._after_jobs.discard(job_id)
+
+    def _start_worker(self, target: Callable[[], None], name: str) -> None:
+        def run() -> None:
+            try:
+                target()
+            finally:
+                current = threading.current_thread()
+                with self._worker_threads_lock:
+                    self._worker_threads.discard(current)
+
+        thread = threading.Thread(target=run, name=name, daemon=True)
+        with self._worker_threads_lock:
+            self._worker_threads.add(thread)
+        thread.start()
+
+    def _has_active_workers(self) -> bool:
+        with self._worker_threads_lock:
+            self._worker_threads = {thread for thread in self._worker_threads if thread.is_alive()}
+            return bool(self._worker_threads)
+
+    def _join_worker_threads(self, timeout: float = 0.8) -> None:
+        deadline = time.monotonic() + timeout
+        with self._worker_threads_lock:
+            threads = list(self._worker_threads)
+        for thread in threads:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if thread is threading.current_thread():
+                continue
+            thread.join(remaining)
+        with self._worker_threads_lock:
+            self._worker_threads = {thread for thread in self._worker_threads if thread.is_alive()}
+
+    def _finish_initial_load(self) -> None:
+        if self._closing:
+            return
+        try:
+            self.refresh_all()
+        except Exception as exc:
+            self._initial_load_pending = False
+            self.set_busy(False)
+            message = self.translator.t("initial_load_failed", error=exc)
+            self.log_panel.error(message)
+            self._status_error_pending = True
+            self.status_bar.set_error(message)
+            messagebox.showerror(self.translator.t("operation_failed"), message)
+        else:
+            self._initial_load_pending = False
+            self.set_busy(False)
+        self._schedule_after(160, self._ensure_game_selected)
 
     def _build_ui(self) -> None:
         self.root.columnconfigure(0, weight=1)
@@ -75,15 +171,18 @@ class ModManagerApp:
 
         header = ttk.Frame(self.root, padding=(16, 14, 16, 8))
         header.grid(row=0, column=0, sticky="ew")
-        header.columnconfigure(0, weight=1)
+        header.columnconfigure(1, weight=1)
+
+        self.mi_studio_button = ttk.Button(header, style="Switch.TButton", command=self.open_mi_studio)
+        self.mi_studio_button.grid(row=0, column=0, rowspan=2, sticky="w", padx=(0, 14))
 
         self.title_label = ttk.Label(header, font=("Microsoft YaHei UI", 15, "bold"))
-        self.title_label.grid(row=0, column=0, sticky="w")
+        self.title_label.grid(row=0, column=1, sticky="w")
         self.subtitle_label = ttk.Label(header, style="Muted.TLabel")
-        self.subtitle_label.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.subtitle_label.grid(row=1, column=1, sticky="w", pady=(4, 0))
 
         toolbar = ttk.Frame(header)
-        toolbar.grid(row=0, column=1, rowspan=2, sticky="e")
+        toolbar.grid(row=0, column=2, rowspan=2, sticky="e")
 
         # Toolbar row 0: game selector + language.
         self.game_label = ttk.Label(toolbar, style="Muted.TLabel")
@@ -98,7 +197,7 @@ class ModManagerApp:
         self.language_label = ttk.Label(toolbar, style="Muted.TLabel")
         self.language_label.grid(row=0, column=4, padx=(0, 6))
         self.language_combo = ttk.Combobox(toolbar, state="readonly", width=12)
-        self.language_combo.grid(row=0, column=5)
+        self.language_combo.grid(row=0, column=5, padx=(0, 8))
         self.language_combo.bind("<<ComboboxSelected>>", self._on_language_selected)
 
         # Toolbar row 1: mod actions.
@@ -166,6 +265,7 @@ class ModManagerApp:
             on_move=self.move_mod,
             on_delete=self.delete_mod,
             on_open_data_dir=self.open_data_dir,
+            on_add_cel_shading_patch=self.add_cel_shading_patch,
             on_reorder=self.reorder_mods,
         )
         self.mod_list.grid(row=0, column=0, sticky="nsew")
@@ -225,6 +325,7 @@ class ModManagerApp:
         self.language_label.configure(text=t("language"))
         self.language_combo.configure(values=list(LANGUAGES.values()))
         self.language_combo.set(LANGUAGES.get(self.translator.language, LANGUAGES["zh_CN"]))
+        self.mi_studio_button.configure(text=t("open_mi_studio"))
         self.import_file_button.configure(text=t("import_file"))
         self.import_folder_button.configure(text=t("import_folder"))
         self.apply_button.configure(text=t("apply"))
@@ -256,6 +357,9 @@ class ModManagerApp:
         state = tk.NORMAL if enabled else tk.DISABLED
         for button in (self.import_file_button, self.import_folder_button, self.apply_button, self.restore_button):
             button.configure(state=state)
+        self.mi_studio_button.configure(
+            state=tk.NORMAL if (self.core.has_active_game and not self.busy) else tk.DISABLED
+        )
         self.remove_game_button.configure(
             state=tk.NORMAL if (self.core.has_active_game and not self.busy) else tk.DISABLED
         )
@@ -342,6 +446,8 @@ class ModManagerApp:
             self._ensure_game_selected()
 
     def _ensure_game_selected(self) -> None:
+        if self._initial_load_pending:
+            return
         if self.core.has_active_game:
             return
         messagebox.showinfo(self.translator.t("app_title"), self.translator.t("first_run_prompt"))
@@ -352,6 +458,19 @@ class ModManagerApp:
     def open_game_dir(self) -> None:
         if self.core.game_root and self.core.game_root.exists():
             os.startfile(self.core.game_root)
+
+    def open_mi_studio(self) -> None:
+        if self.busy:
+            messagebox.showinfo(self.translator.t("app_title"), self.translator.t("task_busy"))
+            return
+        if not self.core.has_active_game:
+            self._ensure_game_selected()
+        if not self.core.has_active_game:
+            return
+        if self.on_open_mi_studio is None:
+            return
+        if self.close(destroy_root=False):
+            self.on_open_mi_studio()
 
     def download_xinput(self) -> None:
         if self.busy or not self.core.has_active_game:
@@ -368,7 +487,7 @@ class ModManagerApp:
             finally:
                 self.queue.put(("busy", False))
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._start_worker(worker, "xinput-download")
 
     def _on_language_selected(self, _event: object) -> None:
         label = self.language_combo.get()
@@ -394,6 +513,8 @@ class ModManagerApp:
         return pane.winfo_width() if axis == "x" else pane.winfo_height()
 
     def _restore_window_and_layout(self) -> None:
+        if self._closing:
+            return
         state = self.core.config.get_window_value("state", "normal")
         if state == "zoomed":
             try:
@@ -408,7 +529,12 @@ class ModManagerApp:
         self._await_stable_layout(0)
 
     def _await_stable_layout(self, attempts: int) -> None:
-        self.root.update_idletasks()
+        if self._closing:
+            return
+        try:
+            self.root.update_idletasks()
+        except tk.TclError:
+            return
         size = (
             self.main_pane.winfo_width(),
             self.left_pane.winfo_height(),
@@ -417,7 +543,7 @@ class ModManagerApp:
         settled = size == self._layout_wait_size and min(size) > 1
         self._layout_wait_size = size
         if not settled and attempts < 40:
-            self.root.after(50, lambda: self._await_stable_layout(attempts + 1))
+            self._schedule_after(50, lambda: self._await_stable_layout(attempts + 1))
             return
         self._apply_sash_fractions()
         self._layout_ready = True
@@ -471,12 +597,32 @@ class ModManagerApp:
                 self.core.config.set_window_value(key, round(fraction, 4))
         self.core.save_config()
 
-    def close(self) -> None:
-        self._save_layout_config()
-        self._model_info_diff_shutdown = True
-        for _index in range(self._model_info_diff_worker_count):
-            self._model_info_diff_queue.put((9999, next(self._model_info_diff_counter), "", "", ""))
-        self.root.destroy()
+    def close(self, destroy_root: bool = True) -> bool:
+        if self._closing:
+            return False
+        if self.busy or self._has_active_workers():
+            messagebox.showinfo(self.translator.t("app_title"), self.translator.t("task_busy"))
+            return False
+        self._closing = True
+        try:
+            self._cancel_after_jobs()
+            try:
+                self.preview_panel.shutdown()
+            except Exception:
+                pass
+            try:
+                self._save_layout_config()
+            except Exception:
+                pass
+            self._stop_model_info_diff_workers()
+            self._join_worker_threads()
+        finally:
+            if destroy_root:
+                try:
+                    self.root.destroy()
+                except tk.TclError:
+                    pass
+        return True
 
     # -- drag & drop ----------------------------------------------------------
 
@@ -578,7 +724,7 @@ class ModManagerApp:
             finally:
                 self.queue.put(("busy", False))
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._start_worker(worker, "preview-url")
 
     def set_model_info_diff_enabled(self, enabled: bool) -> None:
         self.core.set_model_info_diff_enabled(enabled)
@@ -629,7 +775,7 @@ class ModManagerApp:
             finally:
                 self.queue.put(("busy", False))
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._start_worker(worker, "mod-import")
 
     def apply_mods(self) -> None:
         if self.busy:
@@ -660,7 +806,7 @@ class ModManagerApp:
             finally:
                 self.queue.put(("busy", False))
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._start_worker(worker, "mod-apply")
 
     def restore_game(self) -> None:
         if self.busy:
@@ -682,7 +828,6 @@ class ModManagerApp:
                         "status",
                         self.translator.t(
                             "restore_done",
-                            restored=result["restored"],
                             removed=result["removed"],
                         ),
                     )
@@ -693,7 +838,7 @@ class ModManagerApp:
             finally:
                 self.queue.put(("busy", False))
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._start_worker(worker, "mod-clean")
 
     def toggle_mod(self, mod_id: str) -> None:
         self.core.toggle_enabled(mod_id)
@@ -713,6 +858,40 @@ class ModManagerApp:
         self._clear_model_info_diff_cache(mod_id)
         self.refresh_all()
         self.log_panel.info(self.translator.t("deleted_mod", name=mod["name"]))
+
+    def add_cel_shading_patch(self, mod_id: str) -> None:
+        if self.busy:
+            self.log_panel.info(self.translator.t("task_busy"))
+            return
+        if not mod_id:
+            messagebox.showinfo(
+                self.translator.t("select_mod_required_title"),
+                self.translator.t("select_mod_required"),
+            )
+            return
+        self.set_busy(True, self.translator.t("busy_cel_shading_patch"))
+
+        def worker() -> None:
+            try:
+                result = self.core.generate_cel_shading_patch(mod_id, self.thread_log)
+                self.queue.put(
+                    (
+                        "status",
+                        self.translator.t(
+                            "cel_shading_patch_done",
+                            name=result["patch_name"],
+                            files=result["files"],
+                            materials=result["materials"],
+                        ),
+                    )
+                )
+                self.queue.put(("refresh", result["patch_id"]))
+            except Exception as exc:
+                self.queue.put(("error", self.translator.t("cel_shading_patch_failed", error=exc)))
+            finally:
+                self.queue.put(("busy", False))
+
+        self._start_worker(worker, "cel-shading-patch")
 
     def move_mod(self, mod_id: str, direction: int) -> None:
         order = list(self.core.state["order"])
@@ -842,6 +1021,31 @@ class ModManagerApp:
                 daemon=True,
             )
             thread.start()
+            self._model_info_diff_threads.append(thread)
+
+    def _stop_model_info_diff_workers(self) -> None:
+        self._model_info_diff_shutdown = True
+        with self._model_info_diff_lock:
+            self._model_info_diff_pending.clear()
+        while True:
+            try:
+                self._model_info_diff_queue.get_nowait()
+            except queue.Empty:
+                break
+            else:
+                self._model_info_diff_queue.task_done()
+        for _index in range(self._model_info_diff_worker_count):
+            self._model_info_diff_queue.put(
+                (MODEL_INFO_DIFF_PRIORITY_STOP, next(self._model_info_diff_counter), "", "", "")
+            )
+        deadline = time.monotonic() + 0.8
+        for thread in self._model_info_diff_threads:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if thread is threading.current_thread():
+                continue
+            thread.join(remaining)
 
     def _model_info_diff_worker(self) -> None:
         while True:
@@ -897,6 +1101,8 @@ class ModManagerApp:
         targets: Iterable[str] | None = None,
         priority: int = MODEL_INFO_DIFF_PRIORITY_SELECTED,
     ) -> int:
+        if getattr(self, "_closing", False) or getattr(self, "_model_info_diff_shutdown", False):
+            return 0
         game_id = self.core.game_id
         if not game_id:
             return 0
@@ -992,6 +1198,8 @@ class ModManagerApp:
         self.queue.put(("log", message))
 
     def _poll_queue(self) -> None:
+        if self._closing:
+            return
         processed = 0
         try:
             while processed < QUEUE_POLL_ITEM_LIMIT:
@@ -1027,12 +1235,10 @@ class ModManagerApp:
         except queue.Empty:
             pass
         delay = 1 if processed >= QUEUE_POLL_ITEM_LIMIT else 100
-        self.root.after(delay, self._poll_queue)
+        self._schedule_after(delay, self._poll_queue)
 
 
 def main() -> int:
-    core = ModManagerCore()
-    root = TkinterDnD.Tk()
-    ModManagerApp(root, core)
-    root.mainloop()
-    return 0
+    from .router import main as _main
+
+    return _main("manager")

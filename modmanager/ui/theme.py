@@ -3,46 +3,51 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
+# Shared dark tool palette. It uses a muted teal/brass split-complementary
+# relationship: cool graphite surfaces, aged brass actions, and restrained
+# green/red status colors. The MI Studio file list uses a no-fill selection
+# style with a rail/outline, so row state colors remain legible.
 PALETTE = {
-    "bg": "#121513",
-    "panel": "#1b211f",
-    "panel2": "#242c29",
-    "panel3": "#303a36",
-    "line": "#4f5b53",
-    "text": "#f0eadf",
-    "muted": "#aeb8ae",
-    "accent": "#d2b45f",
-    "accent_hover": "#e4c875",
-    "accent_pressed": "#b99541",
-    "green": "#79c79a",
-    "red": "#e07968",
-    "disabled": "#6f7a72",
-    "stripe": "#202723",
-    "heading_bg": "#29322e",
-    "heading_hover": "#34423b",
-    "heading_pressed": "#405249",
-    "selected_bg": "#5b4930",
-    "selected_fg": "#fff3d2",
-    "winner_bg": "#1f3d31",
-    "winner_fg": "#b4efc8",
-    "loser_bg": "#44282e",
-    "loser_fg": "#f5b4bb",
-    "mixed_bg": "#3b3150",
-    "mixed_fg": "#dcc7ff",
-    "partner_bg": "#22394d",
-    "partner_fg": "#b8ddff",
-    "selection_rail": "#9fb7aa",
-    "selection_line": "#657d73",
-    "diff_changed_bg": "#3b3422",
-    "diff_changed_fg": "#efd487",
-    "diff_same_bg": "#20342d",
-    "diff_same_fg": "#a8e0ba",
-    "diff_missing_fg": "#7f8a82",
-    "diff_error_fg": "#e07968",
-    "drag_bg": "#d2b45f",
-    "drag_fg": "#16130a",
-    "input_bg": "#161c1a",
-    "log_bg": "#101412",
+    "bg": "#0E1110",
+    "panel": "#151A18",
+    "panel2": "#1D2421",
+    "panel3": "#28312C",
+    "line": "#3A463F",
+    "text": "#ECE7DA",
+    "muted": "#A0AAA1",
+    "accent": "#C6A15B",
+    "accent_hover": "#D8B96E",
+    "accent_pressed": "#A98442",
+    "green": "#7FB58A",
+    "red": "#D6725F",
+    "disabled": "#69746B",
+    "stripe": "#18201C",
+    "heading_bg": "#202923",
+    "heading_hover": "#29362F",
+    "heading_pressed": "#334139",
+    "selected_bg": "#263A36",
+    "selected_fg": "#F6F0E3",
+    "tree_selected_bg": "#151A18",
+    "winner_bg": "#1D3528",
+    "winner_fg": "#AAD9B5",
+    "loser_bg": "#3D2825",
+    "loser_fg": "#EFB1A6",
+    "mixed_bg": "#332D43",
+    "mixed_fg": "#D0C4EA",
+    "partner_bg": "#22363D",
+    "partner_fg": "#B2D6DE",
+    "selection_rail": "#C6A15B",
+    "selection_line": "#657368",
+    "diff_changed_bg": "#332B1B",
+    "diff_changed_fg": "#E2C06D",
+    "diff_same_bg": "#1F3427",
+    "diff_same_fg": "#B2D9B9",
+    "diff_missing_fg": "#77827A",
+    "diff_error_fg": "#D6725F",
+    "drag_bg": "#C6A15B",
+    "drag_fg": "#14120B",
+    "input_bg": "#101512",
+    "log_bg": "#0B0E0D",
 }
 
 
@@ -97,7 +102,7 @@ def apply_theme(root: tk.Misc) -> dict[str, str]:
     style.configure(
         "Accent.TButton",
         background=colors["accent"],
-        foreground="#191510",
+        foreground="#0c1524",
         bordercolor=colors["accent"],
         focuscolor=colors["accent"],
         focusthickness=0,
@@ -118,6 +123,38 @@ def apply_theme(root: tk.Misc) -> dict[str, str]:
             ("active", colors["accent"]),
         ],
         foreground=[("disabled", colors["disabled"])],
+        relief=[("focus", "flat"), ("pressed", "flat"), ("active", "flat")],
+    )
+    style.configure(
+        "Switch.TButton",
+        background=colors["panel3"],
+        foreground=colors["accent"],
+        bordercolor=colors["accent"],
+        focuscolor=colors["panel3"],
+        focusthickness=0,
+        padding=(14, 7),
+        relief="flat",
+        font=("Microsoft YaHei UI", 10, "bold"),
+    )
+    style.map(
+        "Switch.TButton",
+        background=[
+            ("disabled", colors["panel"]),
+            ("focus", colors["panel3"]),
+            ("pressed", colors["accent"]),
+            ("active", colors["heading_hover"]),
+        ],
+        bordercolor=[
+            ("disabled", colors["line"]),
+            ("focus", colors["accent"]),
+            ("pressed", colors["accent"]),
+            ("active", colors["accent_hover"]),
+        ],
+        foreground=[
+            ("disabled", colors["disabled"]),
+            ("pressed", colors["input_bg"]),
+            ("active", colors["accent_hover"]),
+        ],
         relief=[("focus", "flat"), ("pressed", "flat"), ("active", "flat")],
     )
     style.configure(
@@ -164,6 +201,25 @@ def apply_theme(root: tk.Misc) -> dict[str, str]:
         ],
         foreground=[
             ("selected", colors["selected_fg"]),
+            ("disabled", colors["disabled"]),
+        ],
+    )
+    style.configure(
+        "Rail.Treeview",
+        background=colors["panel"],
+        fieldbackground=colors["panel"],
+        foreground=colors["text"],
+        rowheight=30,
+        bordercolor=colors["line"],
+        lightcolor=colors["line"],
+        darkcolor=colors["line"],
+    )
+    style.map(
+        "Rail.Treeview",
+        background=[
+            ("disabled", colors["panel"]),
+        ],
+        foreground=[
             ("disabled", colors["disabled"]),
         ],
     )
